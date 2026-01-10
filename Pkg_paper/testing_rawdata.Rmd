@@ -1,0 +1,131 @@
+---
+title: "Untitled"
+output: html_document
+date: "2025-09-07"
+---
+
+```{r}
+library(curatedMetagenomicData)
+library(mixOmics)
+library(dplyr)
+```
+
+```{r}
+rawdata <- curatedMetagenomicData("SankaranarayananK_2015.relative_abundance", dryrun = FALSE, counts = TRUE,rownames = "short"  )
+
+raw_tse <- rawdata[[1]]
+abund <- assay(raw_tse, "relative_abundance")
+
+# convert abundance to matrix
+abund <- as.matrix(abund)
+# from raw_tse obtain meta data as dataframe
+meta <- as.data.frame(colData(raw_tse))
+
+df_1 = as.data.frame(abund)
+t_df_1 = as.data.frame(t(df_1))
+```
+```{r}
+t_df_1
+```
+
+
+
+```{r}
+## import from current Curatedmetagenomics
+DataList = curatedMetagenomicData("SankaranarayananK_2015.relative_abundance", dryrun = FALSE, counts = TRUE,rownames = "short")
+dataObject <- DataList[[1]]
+assayData <- assay(dataObject, 1)
+df <- as.data.frame(assayData)
+df$FeatureID <- rownames(assayData)
+t_df = as.data.frame(t(df))
+# t_df
+
+## import data from local
+library(tibble)
+df_ori = read.csv("C:\\Users\\edwar\\Desktop\\Melbourne\\research_project\\curated_metagenomics\\raw_data\\SankaranarayananK_2015.relative_abundance_rawdata.csv")
+df_ori = column_to_rownames(df_ori, var = "X")
+t_df_ori = as.data.frame(t(df_ori))
+# t_df_ori
+all_taxa = colnames(t_df)
+for (taxa in all_taxa) {
+  tell = all(t_df[[taxa]] == t_df_ori[[taxa]])
+  if (tell == F) {
+    print(paste('counts not same:', taxa))
+  }
+}
+
+```
+```{r}
+t_df_1
+```
+
+
+```{r}
+# t_df_1: from Joyce's code deriving CMD
+# t_df: from edward's code deriving CMD
+# t_df_ori: from original rawdata
+
+
+t_df[rownames(t_df) != "FeatureID", ]
+t_df_ori = t_df_ori[rownames(t_df_ori) != "FeatureID", ]
+t_df = t_df[rownames(t_df) != "FeatureID", ]
+t_df[] = lapply(t_df, as.integer)
+t_df_1[] = lapply(t_df_1, as.integer)
+t_df_ori[] = lapply(t_df_ori, as.integer)
+
+print(dim(t_df_1))
+print(dim(t_df))
+print(dim(t_df_ori))
+```
+
+```{r}
+t_df
+```
+
+```{r}
+t_df_1
+```
+
+
+
+```{r}
+
+all_taxa = colnames(t_df_1)
+for (taxa in all_taxa) {
+  tell = all(t_df_1[[taxa]] == t_df_ori[[taxa]])
+  if (tell == F) {
+    print(paste('counts not same:', taxa))
+  }
+}
+```
+
+
+
+
+
+```{r}
+
+```
+
+```{r}
+tell1 = c(1,2,3) == c(1,2,3)
+tell2 = c(1,2,3) == c(3,2,1)
+all_taxa = colnames(t_df)
+
+
+
+```
+
+
+```{r}
+all_taxa = colnames(t_df)
+t_df[[all_taxa[1]]]
+t_df[[taxa]] == t_df_ori[[taxa]]
+```
+
+
+
+
+
+
+

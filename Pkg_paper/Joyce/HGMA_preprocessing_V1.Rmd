@@ -1,0 +1,288 @@
+---
+title: "Version1"
+output: html_document
+---
+
+```{r}
+# load libraries
+library(readr)       
+library(readxl)     
+library(dplyr)   
+library(mixOmics)
+```
+```{r}
+## load in all data
+# ---- Load abundance table ----
+hgma_abund <- read_csv("HGMARawData/vect_atlas.csv")
+# Quick check
+head(hgma_abund)
+
+# ---- Load sample metadata ----
+sample_meta <- read_excel("HGMARawData/sample_metadata.xlsx")
+head(sample_meta)
+
+# ---- Load corresponding taxa table ----
+corr_taxa <- read_csv("HGMARawData/corresponding_taxa.csv")
+head(corr_taxa)
+```
+
+
+```{r}
+## find sample.IDs based on study eg. PRJEB1786
+
+study_meta <- sample_meta %>%
+  dplyr::filter(BioProject == "PRJEB1786") %>%
+  dplyr::select(sample.ID, Disease)          
+
+# Quick check
+head(study_meta)
+```
+
+```{r}
+# ---- Normalize disease labels ----
+study_meta <- study_meta %>%
+  dplyr::mutate(Disease = ifelse(Disease == "NGT", "Healthy", Disease))
+
+# ---- Filter for Healthy and T2D samples ----
+disease_meta <- study_meta %>%
+  dplyr::filter(Disease %in% c("Healthy", "T2D"))
+
+# Quick check counts
+table(disease_meta$Disease)
+dim(disease_meta)
+```
+
+```{r}
+# ---- Subset abundance table keeping taxa column ----
+abund_disease <- hgma_abund %>%
+  dplyr::select(taxa = 1, all_of(disease_meta$sample.ID))
+
+# Quick check
+head(abund_disease[, 1:6])  # taxa + first 5 samples
+dim(abund_disease)
+```
+```{r}
+# ---- Transpose abundance table ----
+# Keep taxa as row names
+abund_transposed <- abund_disease %>%
+  tibble::column_to_rownames(var = "taxa") %>%  # taxa → rownames
+  t() %>%                                       # transpose
+  as.data.frame()                               # back to data.frame
+
+# Quick check
+head(abund_transposed[, 1:5])  # first 5 taxa columns
+dim(abund_transposed)          # samples × taxa
+```
+
+```{r}
+# remove unclassified
+corr_taxa <- corr_taxa[!grepl("unclassified", corr_taxa$name), ]
+
+# filter columns to those in corr_taxa$id
+keep_ids <- colnames(abund_transposed) %in% corr_taxa$id
+abund_transposed <- abund_transposed[, keep_ids, drop = FALSE]
+
+# rename columns to the corresponding names
+colnames(abund_transposed) <- setNames(corr_taxa$name, corr_taxa$id)[colnames(abund_transposed)]
+
+
+# ---- TEST ----
+head(colnames(abund_transposed))
+dim(abund_transposed)
+```
+
+```{r}
+library(dplyr)
+library(stringr)
+
+# get only subspecies with trailing space + digit
+multi_taxa <- corr_taxa[grepl("\\s[0-9]$", corr_taxa$name), ]
+multi_taxa$name <- sub("\\s[0-9]$", "", multi_taxa$name)
+
+# unique species names that had subspecies
+multi_taxa_lst <- unique(multi_taxa$name)
+
+# Make a working copy
+abund_species <- abund_transposed
+
+# Function to check if main species exists
+check_main_species <- function(cols) {
+  nums <- as.character(1:9)
+  for (col in cols) {
+    last_char <- substr(col, nchar(col), nchar(col))
+    if (!(last_char %in% nums)) {
+      return(TRUE)
+    }
+  }
+  return(FALSE)
+}
+
+for (taxa in multi_taxa_lst) {
+
+  # Skip taxa with 'subtype'
+  if (str_detect(tolower(taxa), "subtype")) next
+
+  cols <- colnames(abund_species)
+  alltaxa_columns <- cols[str_detect(cols, fixed(taxa))]
+
+  if (length(alltaxa_columns) == 0) next
+
+  if (length(alltaxa_columns) == 1) {
+    abund_species[[taxa]] <- abund_species[[alltaxa_columns]]
+
+  } else if (check_main_species(alltaxa_columns)) {
+    # Main species exists → remove all subspecies columns
+    subspecies_cols <- setdiff(alltaxa_columns, taxa)
+    abund_species <- abund_species %>% dplyr::select(-all_of(subspecies_cols))
+
+  } else {
+    # Only subspecies exist → sum into new species column
+    abund_species[[taxa]] <- rowSums(abund_species[, alltaxa_columns, drop = FALSE])
+    abund_species <- abund_species %>% dplyr::select(-all_of(alltaxa_columns))
+  }
+}
+
+
+```
+
+
+```{r}
+
+# remove columns with the same value (except disease)
+abund_species <- abund_species %>%
+  dplyr::select(where(~ length(unique(.x)) > 1))
+
+dim(abund_species)
+
+# Rename a single column
+colnames(abund_species)[colnames(abund_species) == "Blautia coccoides == Blautia producta"] <- "Blautia producta"
+
+```
+
+
+
+```{r}
+## low count removal function with cut off 0.01 %, copied from MixOmics website
+low.count.removal <- function(
+                        data, # OTU count df of size n (sample) x p (OTU)
+                        percent=0.0001 # cutoff changed from python code
+                        ) 
+  {
+    keep.otu = which(colSums(data)*100/(sum(colSums(data))) > percent)
+    data.filter = data[,keep.otu]
+    return(list(data.filter = data.filter, keep.otu = keep.otu))
+}
+```
+
+```{r}
+# Identify healthy and T2D samples
+healthy_samples <- disease_meta$sample.ID[disease_meta$Disease == "Healthy"]
+t2d_samples     <- disease_meta$sample.ID[disease_meta$Disease == "T2D"]
+
+cat("Number of healthy samples:", length(healthy_samples), "\n")
+cat("Number of T2D samples:", length(t2d_samples), "\n")
+
+# Subset abundance table by rows
+healthy_df <- abund_species[rownames(abund_species) %in% healthy_samples, , drop = FALSE]
+t2d_df     <- abund_species[rownames(abund_species) %in% t2d_samples, , drop = FALSE]
+
+cat("Number of taxa (columns) in healthy_df before low-count removal:", ncol(healthy_df), "\n")
+cat("Number of taxa (columns) in t2d_df before low-count removal:", ncol(t2d_df), "\n")
+
+# Apply low count removal
+healthy_res <- low.count.removal(healthy_df, percent = 0.0001)
+t2d_res     <- low.count.removal(t2d_df, percent = 0.0001)
+
+# Extract filtered OTU tables
+healthy_filtered <- healthy_res$data.filter
+t2d_filtered     <- t2d_res$data.filter
+
+cat("Number of taxa (columns) in healthy_filtered after low-count removal:", ncol(healthy_filtered), "\n")
+cat("Number of taxa (columns) in t2d_filtered after low-count removal:", ncol(t2d_filtered), "\n")
+
+# Union of OTUS
+otus_to_keep <- union(colnames(healthy_filtered), colnames(t2d_filtered))
+cat("Number of OTUs in union:", length(otus_to_keep), "\n")
+
+# subset the original abundance to only keep low count union OTU columns
+abund_filtered <- abund_species[, colnames(abund_species) %in% otus_to_keep, drop = FALSE]
+cat("Number of taxa (columns) in abund_filtered:", ncol(abund_filtered), "\n")
+```
+
+```{r}
+## get the smallest non zero number for offset
+# Flatten the table to a vector, ignoring zeros
+non_zero_values <- abund_filtered[abund_filtered > 0]
+
+# Find the smallest non-zero value
+min_offset <- min(non_zero_values)
+```
+
+
+```{r}
+## apply clr for the numeric data, and add on the SID and disease afterwards. 
+data.clr <- logratio.transfo(as.matrix(abund_filtered), logratio = 'CLR', offset = min_offset)
+clr_mat <- unclass(data.clr) 
+clr_df <- as.data.frame(clr_mat)
+```
+
+```{r}
+# save data for modelling
+saveRDS(clr_df, "HGMA")
+```
+
+```{r}
+# --- 1. Prepare taxa tables ---
+# Remove 'Disease' column (case-insensitive)
+py_taxa <- py_clr[, !grepl("^disease$", colnames(py_clr), ignore.case = TRUE), drop = FALSE]
+r_taxa  <- r_clr[, !grepl("^disease$", colnames(r_clr), ignore.case = TRUE), drop = FALSE]
+
+# Remove non-numeric columns (e.g., rownames accidentally included)
+py_taxa <- py_taxa[, sapply(py_taxa, is.numeric), drop = FALSE]
+r_taxa  <- r_taxa[, sapply(r_taxa, is.numeric), drop = FALSE]
+
+# Convert all columns to numeric (safe)
+py_taxa[] <- lapply(py_taxa, function(x) as.numeric(as.character(x)))
+r_taxa[]  <- lapply(r_taxa, function(x) as.numeric(as.character(x)))
+
+# Count number of taxa
+num_taxa <- data.frame(
+  Dataset = c("Python", "R"),
+  Num_Taxa = c(ncol(py_taxa), ncol(r_taxa))
+)
+cat("=== Number of taxa ===\n")
+print(num_taxa)
+
+# --- 2. Column sums for matching taxa ---
+common_taxa <- intersect(colnames(py_taxa), colnames(r_taxa))
+
+col_sums_table <- data.frame(
+  Taxa = common_taxa,
+  Sum_Python = colSums(py_taxa[, common_taxa, drop = FALSE], na.rm = TRUE),
+  Sum_R = colSums(r_taxa[, common_taxa, drop = FALSE], na.frm = TRUE)
+)
+col_sums_table$Difference <- col_sums_table$Sum_Python - col_sums_table$Sum_R
+
+cat("\n=== Column sums for matching taxa ===\n")
+print(col_sums_table)
+
+# --- 3. Row sums for each dataset (CLR should be ~0) ---
+row_sums_py <- rowSums(py_taxa, na.rm = TRUE)
+row_sums_r  <- rowSums(r_taxa, na.rm = TRUE)
+
+# Quick check for near-zero row sums (floating-point errors)
+row_sums_py <- round(row_sums_py, 10)
+row_sums_r  <- round(row_sums_r, 10)
+
+row_sums_table <- data.frame(
+  Row = 1:nrow(py_taxa),
+  Sum_Python = row_sums_py,
+  Sum_R = row_sums_r
+)
+
+cat("\n=== Row sums (Python vs R) ===\n")
+print(head(row_sums_table, 10))
+
+```
+
+

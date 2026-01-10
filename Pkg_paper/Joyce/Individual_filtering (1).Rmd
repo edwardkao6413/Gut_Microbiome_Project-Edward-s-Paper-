@@ -1,0 +1,162 @@
+---
+title: "Individual_filtering"
+output: html_document
+---
+
+
+```{r}
+library(mixOmics)
+library(dplyr)
+```
+
+## Filter studies by PLS-DA misclassification
+
+The function `individual_filtering()` evaluates one or more microbiome studies based on
+their cross-validated PLS-DA performance. Studies (or single datasets) are retained only
+if their class-level misclassification rates do not exceed a specified threshold.
+
+**Arguments:**
+- `data`: A single study (list with `abund` and `meta`) or a nested list of studies.  
+  Each study must contain:  
+  - `abund`: Dataframe or matrix of abundances (n samples × p features)  
+  - `meta`: Dataframe with sample metadata, including a `disease` column for outcomes
+- `err_thres`: Numeric threshold for class misclassification (default `0.7`).  
+  Studies with any sample exceeding this error are filtered out.
+- `ncomp`: Number of components for the PLS-DA model (default `2`)
+- `validation`: Type of cross-validation (default `"Mfold"`)
+- `folds`: Number of folds for cross-validation (default `5`)
+- `dist`: Distance metric used in PLS-DA performance (default `"max.dist"`)
+
+**Returns:**
+- If a single study is provided: `TRUE` if it passes the threshold, `FALSE` otherwise
+- If a nested list of studies is provided: A filtered list containing only studies that
+  passed the threshold, keeping the original structure (`abund` + `meta`)
+```{r}
+individual_filtering <- function(data, err_thres = 0.7, ncomp = 2,
+                                 validation = "Mfold", folds = 5, dist = "max.dist") {
+  
+  # Helper to check a single study
+  check_single_dataset <- function(study) {
+    abund <- study$abund   # renamed from bund
+    meta  <- study$meta
+    Y <- factor(meta$disease)
+    
+    plsda.model <- plsda(abund, Y, ncomp = ncomp)
+    perf.model <- perf(
+      object = plsda.model,
+      validation = validation,
+      folds = folds,
+      progressBar = FALSE,
+      dist = dist
+    )
+    
+    class_errors <- perf.model$error.rate.class[[dist]]
+    exceed_threshold <- apply(class_errors, 1, function(x) any(x > err_thres))
+    
+    keep_dataset <- !any(exceed_threshold)
+    return(keep_dataset)
+  }
+  
+  # Case 1: single study (has both abund and meta)
+  if (is.list(data) && all(c("abund","meta") %in% names(data))) {
+    return(check_single_dataset(data))
+  }
+  
+  # Case 2: nested list of studies
+  if (is.list(data) && !all(c("abund","meta") %in% names(data))) {
+    results <- purrr::imap(data, function(study, study_name) {
+      if (!all(c("abund","meta") %in% names(study))) {
+        stop(paste("Study", study_name, "is missing abund or meta"))
+      }
+      keep <- check_single_dataset(study)
+      if (keep) return(study) else return(NULL)
+    })
+    results <- results[!purrr::map_lgl(results, is.null)]
+    return(results)
+  }
+  
+  stop("Input must be a single study (abund + meta) or a nested list of studies")
+}
+
+
+
+```
+
+
+```{r}
+# individual filtering testing
+CMD_filtered <- readRDS("res")
+
+# test with a list of studies --> returned a list with all studies except single_lij
+result <- individual_filtering(CMD_filtered)
+
+# test with a single study --> returned FALSE
+single_lij <- individual_filtering(response$LiJ_2014.relative_abundance)
+
+```
+
+
+
+
+## My test
+```{r}
+check_single_dataset <- function(study) {
+    abund <- study$abund   # renamed from bund
+    meta  <- study$meta
+    Y <- factor(meta$disease)
+    
+    plsda.model <- plsda(abund, Y, ncomp = ncomp)
+    perf.model <- perf(
+      object = plsda.model,
+      validation = validation,
+      folds = folds,
+      progressBar = FALSE,
+      dist = dist
+    )
+    
+    #class_errors <- perf.model$error.rate.class[[dist]]
+    #exceed_threshold <- apply(class_errors, 1, function(x) any(x > err_thres))
+    class_errors <- perf.model$error.rate.class[[dist]][, ncomp]
+    exceed_threshold <- any(class_errors > err_thres)
+    
+    keep_dataset <- !any(exceed_threshold)
+    return(keep_dataset)
+}
+CMD_filtered <- readRDS("res")
+
+```
+
+
+```{r}
+i = 6
+names(CMD_filtered)[i]
+abund=CMD_filtered[[i]]$abund
+meta=CMD_filtered[[i]]$meta
+Y=factor(meta$disease)
+ncomp=2 ; validation="Mfold" ; folds=5 
+dist = "max.dist"
+dist="centroids.dist"
+err_thres=0.7
+
+plsda.model <- plsda(abund, Y, ncomp = ncomp)
+    perf.model <- perf(
+      object = plsda.model,
+      validation = validation,
+      folds = folds,
+      progressBar = FALSE,
+      dist = dist
+    )
+
+class_errors <- perf.model$error.rate.class[[dist]][, ncomp]
+# exceed_threshold <- apply(class_errors, 2, function(x) any(x > err_thres))
+exceed_threshold <- any(class_errors > err_thres)
+!any(exceed_threshold)
+```
+
+
+```{r}
+
+```
+
+
+

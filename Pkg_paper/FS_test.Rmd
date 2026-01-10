@@ -1,0 +1,351 @@
+---
+title: "Untitled"
+output: html_document
+date: "2025-12-07"
+---
+
+```{r}
+library(dplyr)
+library(mixOmics)
+source('Function_Helpers.R')
+```
+
+```{r}
+res = readRDS('res')
+names(res)
+```
+
+
+# Functions for measuring balanced error rate
+```{r}
+
+# single_study: one of the element in 'res' structure, including $abund and $meta
+calculate_BER = function(single_study, ncomp=2, validation="Mfold", 
+                         folds=5, nrepeat=10, dist = "centroids.dist") {
+  
+  abund = single_study$abund
+  meta = single_study$meta
+  Y = factor(meta$disease)
+  
+  plsda.model = plsda(X=abund, Y=Y, ncomp=ncomp)
+  perf.model = perf(
+    object = plsda.model,
+    validation = validation,
+    folds = folds,
+    progressBar = FALSE,
+    dist = dist, 
+    nrepeat = nrepeat
+  )
+  ## return the error rate of all the components, two classes
+  return(perf.model$error.rate$BER[ncomp, ])
+}
+
+```
+
+# Functions for eliminating taxa that only appears in a study
+```{r}
+## finalized the retained taxa
+# funtion for filtering the taxa that only exist in a single study
+
+# lst_df: an integrative dataframes from 'res' structure, using bind_rows() from dpylr to obtain integrative dataframe of abund and meta
+# usage: applied in the function of measuring BER in multiple datasets
+eliminate_single_taxa = function(lst_df, study_col = "study", n_taxa=1) {
+  
+  dff = data.frame()
+  df = lst_df$abund
+  df$study = lst_df$meta[[study_col]]
+  # df$disease = lst_df$meta$disease
+  taxa_lst = setdiff(colnames(df), c(study_col))
+  for (species in taxa_lst) {
+    # Initialize a temporary data frame for the current species
+    df_taxa <- data.frame(species = species, stringsAsFactors = FALSE)
+    
+    # Check for presence in each study
+    for (study in unique(df$study)) {
+      # Filter data for the current study and species
+      study_data <- df[df$study == study, species]
+      
+      # Determine if the species is detected or not
+      if (length(unique(study_data)) == n_taxa) {
+        df_taxa[[study]] <- "x"
+      } else {
+        df_taxa[[study]] <- "Exist"
+      }
+    }
+    
+    # Append to the main data frame
+    dff <- rbind(dff, df_taxa)
+  }
+  
+  dff1 = dff
+  dff1[, unique(df$study)] <- lapply(dff1[, unique(df$study)], function(x) ifelse(x == "Exist", 1, 0))
+  dff$Exist_count <- rowSums(dff1[, unique(df$study)])
+  one_taxa <- dff[dff$Exist_count == n_taxa, "species"]
+  return(df[, !(colnames(df) %in% one_taxa)])
+}
+
+
+```
+
+# Functions for measuing BER of multiple datasets
+```{r}
+
+names(res)
+data = res; ncomp = 2; study_col = "study"; validation = "Mfold"; folds = 5; nrepeat = 10; dist = "centroids.dist"
+lst = list() ## input list
+lst[[names(res)[1]]] = res[[names(res)[1]]]
+lst[[names(res)[2]]] = res[[names(res)[2]]]
+
+
+
+## add study column in each metadata matrix
+for (name in names(lst)) {
+  lst[[name]]$meta$study = strsplit(name, '\\.')[[1]][1]
+  # lst[[name]]$meta$study = name
+}
+# binding together
+lst_df = bind_rows(lst)
+
+# eliminate taxa only appear in one study
+comb_df = eliminate_single_taxa(lst_df, study_col = study_col)
+
+abund_X = comb_df[ ,setdiff(names(comb_df), study_col), drop = FALSE]
+Y = lst_df$meta$disease
+corresponding_study = comb_df$study
+
+model = mint.splsda(X=abund_X, Y=Y, study=corresponding_study, ncomp=ncomp)
+perf.model = perf(model, validation=validation, folds=folds, dist=dist)
+perf.model$global.error$BER[ncomp, ]
+
+############ function ####################
+calculate_multipleDB_BER = function(lst, ncomp=2, study_col="study", validation="Mfold", 
+                                    folds=5, nrepeat=10, dist="centroids.dist", n_taxa=1) {
+  
+  ## add study column in each metadata matrix
+  for (name in names(lst)) {
+    lst[[name]]$meta$study = strsplit(name, '\\.')[[1]][1]
+    # lst[[name]]$meta$study = name
+  }
+  # binding together
+  lst_df = bind_rows(lst)
+  
+  # eliminate taxa only appear in one study
+  comb_df = eliminate_single_taxa(lst_df, study_col = study_col, n_taxa=n_taxa)
+  abund_X = comb_df[ ,setdiff(names(comb_df), study_col), drop = FALSE]
+  Y = lst_df$meta$disease
+  corresponding_study = comb_df$study
+  model = mint.splsda(X=abund_X, Y=Y, study=corresponding_study, ncomp=ncomp)
+  perf.model = perf(model, validation=validation, folds=folds, dist=dist)
+  
+  # return the global overall BER
+  return(perf.model$global.error$BER[ncomp, ])
+}
+
+```
+
+
+
+# forward selection
+## function
+```{r}
+## data: study pool
+forward_selection = function(data, ncomp=2, study_col="study", validation='Mfold', folds=5, nrepeat=10, 
+                             dist="centroids.dist", n_taxa=1) {
+  remain_studies = list()   # studies included in combination
+  i = 0  # calculate round
+  
+  ## tell which study should be put in the combination as first study
+  cat("########## ROUND ", i+1, " ##########", "\n")
+  cat("Total study: ", length(data), "\n")
+  cat("Processing... Testing studies: ", names(data), "\n")
+  first_study = ""
+  ERR = 1
+  for (study in names(data)) {
+    study_ERR = calculate_BER(data[[study]])
+  
+    if ( study_ERR < ERR ) {
+      first_study = study
+      ERR = study_ERR
+    }
+  }
+  # input the first study
+  cat("Introduce ", first_study, " into combination.", "\n")
+  remain_studies[[first_study]] = data[[first_study]]   # plugin the first study into combination permanently
+  cat("########## Current combination:", names(remain_studies), " round ", i+1, "\n") 
+  data[[first_study]] = NULL     # delete first study from the study pool permanently
+  for (j in 1:2) {
+    cat("                                     ", "\n")
+  }
+  
+  
+  # start formal forward selection
+  dynamic_BER = 1  # lowest BER of combination
+  current_BER = 1  # BER for current combination
+  while ( (length(data) > 0) | (current_BER > dynamic_BER) ) {
+    ## searching for the datasets in all available studies
+    i = i + 1
+    cat("########## ROUND ", i+1, " ##########", "\n")
+    
+    combin_err = 1
+    selected_study = ""
+    for (study in names(data)) {
+      ## add study into combination iteratively
+      remain_studies[[study]] = data[[study]]; # cat("adding ", study, " in combination", "\n")
+      err = calculate_multipleDB_BER(remain_studies, ncomp=ncomp, study_col=study_col, 
+                                     validation=validation, dist=dist, n_taxa=n_taxa)
+      cat( "Processing... Test new combination: ", names(remain_studies), "\n" )
+      
+      if (err < combin_err) {
+        combin_err = err
+        selected_study = study
+      }
+      # delete the inserted studies, and go calculating BER for adding next study
+      remain_studies[[study]] = NULL; #  cat("removing ", study, " out of combination", "\n")
+    }
+    
+    # After calculating all the combinations, calculate the combination of BER that generates the lowest BER
+    #cat("grab studies ", "(", selected_study, ")", " into round ", i , "\n")
+    #cat("Its BER is ", combin_err, "\n")
+    remain_studies[[selected_study]] = data[[selected_study]]  # formally add a new study into current combination
+    data[[selected_study]] = NULL    # delete the study which has been added into current combination from the study pool
+    current_BER = combin_err  # assign the lowest BER produced in current number of combination
+    #current_BER = calculate_multipleDB_BER(remain_studies, ncomp=ncomp, study_col=study_col, 
+    #                                 validation=validation, dist=dist)
+    
+    if (current_BER < dynamic_BER) {
+      #cat("current_BER: ", current_BER, "\n")
+      #cat("dynamic_BER: ", dynamic_BER, "\n")
+      #cat("current BER lower than dynamic global BER, assign it as new dynamic global BER", "\n")
+      dynamic_BER = current_BER
+      cat("Introduce ", selected_study, " into combination.", "\n")
+      cat("########## Current combination:", names(remain_studies), " round ", i+1, "\n")
+      # remain_studies[[selected_study]] = data[[selected_study]]
+    } else {
+      cat("No improvement in BER after introducing new dataset into combination", "\n")
+      cat("########## Current combination:", names(remain_studies), " round ", i+1, "\n")
+      #cat("current_BER: ", current_BER, "\n")
+      #cat("dynamic_BER: ", dynamic_BER, "\n")
+      # Bcz adding new study cannot bring us lower BER, we kick it out
+      remain_studies[[selected_study]] = NULL
+      break
+    }
+    
+    for (j in 1:2) {
+      cat("                                     ", "\n")
+    }
+  }
+  
+  if (length(data) == 0) {
+    print("All studies have been selected since BER is improved round to round.")
+  }
+  cat("                                     ", "\n")
+  cat("Number of study in the final combination: ", length(remain_studies), "\n")
+  cat("Studies include: ", names(remain_studies) )
+  return(remain_studies)
+}
+
+remain_studies = forward_selection(res)
+```
+
+
+## scattered code
+```{r}
+data = res; ncomp=2; study_col="study"; validation="Mfold"; folds=5; nrepeat=10; dist="centroids.dist"
+remain_studies = list()
+# data: study pool, where each study contains its abundance matrix and metadata
+
+## tell which study should be put in the combination as first study
+first_study = ""
+ERR = 1
+for (study in names(data)) {
+  study_ERR = calculate_BER(data[[study]])
+
+  if ( study_ERR < ERR ) {
+    first_study = study
+    ERR = study_ERR
+  }
+}
+# input the first study
+remain_studies[[first_study]] = data[[first_study]]
+data[[first_study]] = NULL
+
+i = 0
+# start formal forward selection
+dynamic_BER = 1  # lowest BER of combination
+current_BER = 1  # BER for current combination
+while ( (length(data) > 0) | (current_BER > dynamic_BER) ) {
+  ## searching for the datasets in all available studies
+  i = i + 1
+  for (j in 1:5) {
+    cat("########## Current combination:", names(remain_studies), " round ", i, "\n") 
+  }
+  
+  combin_err = 1
+  selected_study = ""
+  for (study in names(data)) {
+    ## add study into combination iteratively
+    remain_studies[[study]] = data[[study]]; cat("adding ", study, " in combination", "\n")
+    err = calculate_multipleDB_BER(remain_studies, ncomp=ncomp, study_col=study_col, 
+                                   validation=validation, dist=dist)
+    if (err < combin_err) {
+      combin_err = err
+      selected_study = study
+    }
+    # delete the inserted studies, and go calculating BER for adding next study
+    remain_studies[[study]] = NULL; cat("removing ", study, " out of combination", "\n")
+  }
+  
+  # After calculating all the combinations, calculate the combination of BER that generates the lowest BER
+  cat("grab studies ", "(", selected_study, ")", " into round ", i , "\n")
+  cat("Its BER is ", combin_err, "\n")
+  remain_studies[[selected_study]] = data[[selected_study]]  # formally add a new study into current combination
+  data[[selected_study]] = NULL    # delete the study which has been added into current combination from the study pool
+  current_BER = combin_err  # assign the lowest BER produced in current number of combination
+  #current_BER = calculate_multipleDB_BER(remain_studies, ncomp=ncomp, study_col=study_col, 
+  #                                 validation=validation, dist=dist)
+  
+  
+  if (current_BER < dynamic_BER) {
+    cat("current_BER: ", current_BER, "\n")
+    cat("dynamic_BER: ", dynamic_BER, "\n")
+    cat("current BER lower than dynamic global BER, assign it as new dynamic global BER", "\n")
+    dynamic_BER = current_BER
+    # remain_studies[[selected_study]] = data[[selected_study]]
+  } else {
+    cat("No improvement in BER after introducing new dataset into combination", "\n")
+    cat("current_BER: ", current_BER, "\n")
+    cat("dynamic_BER: ", dynamic_BER, "\n")
+    # Bcz adding new study cannot bring us lower BER, we kick it out
+    remain_studies[[selected_study]] = NULL
+    break
+  }
+  
+  for (j in 1:7) {
+    cat("                                     ", "\n")
+  }
+  
+}
+
+
+```
+
+```{r}
+dynamic_BER
+current_BER
+names(remain_studies)
+names(data)
+combin_err
+```
+
+
+
+```{r}
+lst <- list(a=1, b=2, c=3)
+lst$a=NULL
+lst$b=NULL
+lst$c=NULL
+length(lst)
+```
+
+
+

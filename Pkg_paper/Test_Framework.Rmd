@@ -1,0 +1,178 @@
+---
+title: "Test_Framework"
+output: html_document
+date: "2025-11-29"
+---
+
+```{r}
+rm(list=ls()) 
+source("Function_Helpers.R")
+```
+
+# Packages installation
+```{r}
+req_pkgs = c('dplyr', 'mixOmics', 'curatedMetagenomicData', 'SummarizedExperiment', 
+             'stringr', 'testthat', 'tibble', 'stringr', 'purrr')
+
+install_if_missing(req_pkgs) 
+```
+
+
+## Data Loading
+```{r}
+study_names <- c("FengQ_2015.relative_abundance", "HMP_2019_t2d.relative_abundance", 
+                 "KarlssonFH_2013.relative_abundance", "LiJ_2014.relative_abundance", 
+                 "YuJ_2015.relative_abundance", "SankaranarayananK_2015.relative_abundance")
+
+# Load and process each study
+abundance_lst <- lapply(study_names, function(study) {
+  rawdata <- curatedMetagenomicData(study, dryrun = FALSE, counts = TRUE, rownames = "short")
+  raw_tse <- rawdata[[1]]
+  abund <- assay(raw_tse, "relative_abundance")
+  as.data.frame(t(abund))
+})
+
+## output data: keys are study name, each col is taxa name
+
+# Extract metadata for each study
+meta_lst <- lapply(study_names, function(study) {
+  rawdata <- curatedMetagenomicData(study, dryrun = FALSE, counts = TRUE, rownames = "short")
+  raw_tse <- rawdata[[1]]
+  as.data.frame(colData(raw_tse))
+})
+
+# change the study name so users can read it easily.
+study_names_v2 = c()
+for (i in 1:length(strsplit(study_names, "\\.")) ) {
+  study_names_v2[i] = strsplit(study_names, "\\.")[[i]][1]
+}
+
+names(abundance_lst) <- study_names_v2  
+names(meta_lst) <- study_names_v2
+```
+
+
+## Data Processing
+```{r}
+keep_cols <-c("gender", "body_site")
+diseases <- c("Healthy", "T2D")
+res<- run_preprocessing(abundance_list = abundance_lst, meta_list = meta_lst, diseases = diseases, keep_cols = keep_cols, percent = 0.01, offset_value = 1, threshold = 1)
+```
+
+# Model Development and Training
+## Data Integration
+### Individual filtering
+```{r}
+# CMD_filtered = readRDS("res")
+result <- individual_filtering(res, dist="centroids.dist", ncomp=2, err_thres = 0.5)
+names(result)
+```
+
+
+
+### Forward selection
+```{r}
+result = forward_selection(res, dist="centroids.dist", ncomp=2)
+```
+
+## Modelling
+```{r}
+## compose off integrative datasets for all selected studies
+for (name in names(result)) {
+  result[[name]]$meta$study = strsplit(name, '\\.')[[1]][1]
+  # lst[[name]]$meta$study = name
+}
+# binding together
+result_df = bind_rows(result)
+ab.mint.splsda = tune(method = "mint.splsda", X = result_df$abund, Y = as.factor(result_df$meta$disease), ncomp = 2, folds=5, nrepeat=10,
+                      study = as.factor(result_df$meta$study), test.keepX = seq(10, ncol(result_df$abund), 1), validation = 'Mfold', dist = "centroids.dist") 
+plot(ab.mint.splsda)
+optimal.keepX = ab.mint.splsda$choice.keepX
+optimal.keepX
+mint.splsda.model = mint.splsda(X=result_df$abund, Y=result_df$meta$disease, 
+                                study=result_df$meta$study, ncomp=2, keepX = optimal.keepX)
+
+perf(mint.splsda.model, validation="Mfolds", folds=5, nrepeat=10, dist="centroids.dist")$global.error$error.rate.class
+
+## Confusion matrix for training set
+predict.splsda.null <- predict(mint.splsda.model, newdata = result_df$abund, 
+                             dist = "centroids.dist", study.test = result_df$meta$study)
+
+conf_mat_c1 = get.confusion_matrix(truth = result_df$meta$disease, predicted = predict.splsda.null$class$centroids.dist[, 1])
+conf_mat_c2 = get.confusion_matrix(truth = result_df$meta$disease, predicted = predict.splsda.null$class$centroids.dist[, 2])
+conf_mat_c1
+conf_mat_c2
+```
+
+
+```{r}
+X = result_df$abund; Y = as.factor(result_df$meta$disease)
+# result_df$meta$study
+
+dim(result_df$abund)
+dim(as.data.frame(result_df$meta$disease))
+dim(as.data.frame(result_df$meta$study))
+```
+
+### introducing testing set
+```{r}
+# testset1 = draw_TestSet(dataset_study="PRJEB1786")
+# testset2 = draw_TestSet(dataset_study="PRJNA422434")
+testset1_obj = readRDS("PRJEB1786.rds")
+testset2_obj = readRDS("PRJNA422434.rds")
+keep_cols <-c("Gender", "sample.ID")
+diseases <- c("Healthy", "T2D", "NGT")
+
+# calculate the second smallest value
+test_obj = testset1_obj
+x <- unlist(test_obj$abund)
+x <- x[x > 0]
+second_smallest <- sort(unique(x), na.last = NA)[2]
+
+
+abundance_lst_test = list(test1 = test_obj$abund)
+meta_lst_test = list(test1 = test_obj$meta)
+
+
+testset<- run_preprocessing(abundance_list = abundance_lst_test, meta_list = meta_lst_test, diseases = diseases, keep_cols = keep_cols, percent = 0.01, offset_value = second_smallest, threshold = 1)
+common_taxa = intersect( names(result_df$abund), names(testset$data) )
+
+# common_taxa = intersect( names(result_df$abund), names(testset$data) )
+new_train = result_df$abund[, common_taxa, drop=F]
+new_test = testset$data[, common_taxa, drop=F]
+testset$meta = testset$meta %>% 
+  mutate(disease = if_else(disease == "NGT", "Healthy", disease))
+testset$meta$study = "testing_set"
+
+```
+
+### Generalization
+```{r}
+# re-train
+ab.mint.splsda = tune(method = "mint.splsda", X = new_train, Y = as.factor(result_df$meta$disease), ncomp = 2, folds=5, nrepeat=10,
+                      study = as.factor(result_df$meta$study), test.keepX = seq(10, ncol(new_train), 1), validation = 'Mfold', dist = "centroids.dist") 
+plot(ab.mint.splsda)
+optimal.keepX = ab.mint.splsda$choice.keepX
+
+mint.splsda.model = mint.splsda(X=new_train, Y=result_df$meta$disease, 
+                                study=result_df$meta$study, ncomp=2, keepX = optimal.keepX)
+
+perf(mint.splsda.model, validation="Mfolds", folds=5, nrepeat=10, dist="centroids.dist")$global.error$error.rate.class
+
+
+## Confusion matrix for testing set
+predict.splsda.null <- predict(mint.splsda.model, newdata = new_test, 
+                             dist = "centroids.dist", study.test = testset$meta$study)
+
+conf_mat_c1 = get.confusion_matrix(truth = testset$meta$disease, predicted = predict.splsda.null$class$centroids.dist[, 1])
+conf_mat_c2 = get.confusion_matrix(truth = testset$meta$disease, predicted = predict.splsda.null$class$centroids.dist[, 2])
+conf_mat_c1
+conf_mat_c2
+```
+
+
+
+
+
+
+

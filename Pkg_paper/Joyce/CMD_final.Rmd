@@ -1,0 +1,515 @@
+
+
+```{r}
+# import libraries
+library(testthat)
+library(dplyr)
+library(SummarizedExperiment)
+library(mixOmics)
+library(stringr)
+library(tibble)
+library(stringr)
+library(purrr)
+library(curatedMetagenomicData)
+```
+## Filtering and Normalizing Metadata
+
+The function `filtered_meta_list()` takes a metadata dataframe and applies 
+a mapping of regex patterns to normalize disease labels.  
+
+**Arguments:**
+- `meta`: Dataframe with a column `"disease"`. Row names are sample IDs.  
+- `disease_map`: Named list where regex patterns map to standardized labels.  
+- `cols_to_keep`: List of columns from metadata to be kept
+
+**Returns:**  
+A tibble with:  
+- `SID`: Sample IDs (from rownames)  
+- `disease`: Normalized disease states 
+- `metadata_colums`: Other columns from metadata to be kept
+```{r}
+
+filter_meta <- function(meta, diseases, cols_to_keep = NULL) {
+  
+  # 1. Check input
+  if (!"disease" %in% colnames(meta)) {
+    stop("`meta` must contain a column named 'disease'.")
+  }
+  if (!is.null(cols_to_keep)) {
+    missing_cols <- setdiff(cols_to_keep, colnames(meta))
+    if (length(missing_cols) > 0) {
+      stop("The following columns are missing from metadata: ",
+           paste(missing_cols, collapse = ", "))
+    }
+  }
+  
+  # 2. Normalize disease names (case-insensitive)
+  meta <- meta %>%
+    mutate(disease = map_chr(disease, function(x) {
+      matched <- NA
+      for (pattern in diseases) {
+        if (str_detect(x, regex(pattern, ignore_case = TRUE))) {
+          matched <- pattern
+          break
+        }
+      }
+      if (is.na(matched)) x else matched
+    }))
+  
+  # 3. Filter metadata
+  filtered_meta <- meta %>% filter(disease %in% diseases)
+  
+  # 4. Select columns
+  if (!is.null(cols_to_keep)) {
+    filtered_meta <- filtered_meta %>% dplyr::select(disease, all_of(cols_to_keep))
+  } else {
+    filtered_meta <- filtered_meta %>% dplyr::select(disease)
+  }
+  
+  # 5. Return (row names preserved automatically by R)
+  return(filtered_meta)
+}
+
+```
+
+## Split Count Filtering by Disease
+
+The function `split_count_filtering()` filters an abundance dataframe by applying
+low-abundance OTU removal **within each disease group** and then taking the union
+of retained OTUs across all groups. If there is only one disease, it simply applies
+low-count removal to the full dataset.
+
+**Arguments:**
+- `labelled_abund`: Abundance dataframe/tibble with `SID` as the first column.
+- `diseases`: Vector of disease names to split by.
+- `percent`: Numeric threshold for low count removal (same as in `low_count_removal`).
+- `meta`: Metadata dataframe containing `SID` and `disease` columns (needed to subset samples by disease).
+
+**Returns:**
+- A filtered abundance dataframe containing only OTUs that survived low-count filtering
+  across all specified disease groups.
+```{r}
+split_count_filtering <- function(labelled_abund, diseases, percent, filtered_meta) {
+  
+  # Case: less than 2 diseases
+  if (length(diseases) < 2) {
+    message("Not enough diseases to split; running low count removal on full dataset")
+    res <- low_count_removal(labelled_abund, percent)
+    abundance_filtered <- res$data.filter
+  } else {
+    all_keep_otu <- c()
+    
+    for (disease_name in diseases) {
+      
+      # Subset samples matching this disease, preserving rownames
+      disease_sids <- rownames(filtered_meta)[filtered_meta$disease == disease_name]
+      disease_df <- labelled_abund[disease_sids, , drop = FALSE]
+    
+      
+      # Apply low count removal
+      res <- low_count_removal(disease_df, percent)
+      
+      all_keep_otu <- union(all_keep_otu, res$keep.otu)
+    }
+    
+    # Filter original abundance table by OTUs that survived across all groups
+    
+    abundance_filtered <- labelled_abund[, all_keep_otu, drop = FALSE]
+    
+    # Ensure numeric matrix, no lists, preserve rownames
+    abundance_filtered <- as.data.frame(lapply(abundance_filtered, function(col) {
+      if (is.list(col)) col <- unlist(col)
+      as.numeric(col)
+    }), row.names = rownames(abundance_filtered))
+  }
+  #View(abundance_filtered)
+  return(abundance_filtered)
+}
+```
+
+## Remove low-abundance OTUs
+
+The function `low_count_removal()` filters OTUs (columns) in a count matrix or dataframe
+based on their relative abundance. Only OTUs that contribute more than a specified
+percentage of the total counts are kept.
+
+**Arguments:**
+- `data`: Dataframe or matrix of OTU counts (n samples × p OTUs)
+- `percent`: Numeric threshold (default `0.0001`). OTUs contributing more than this
+  percentage of total counts are kept.
+
+**Returns:**
+A list with two elements:
+- `data.filter`: Filtered count dataframe containing only OTUs above the threshold
+- `keep.otu`: Indices of the OTUs that were kept
+```{r}
+low_count_removal <- function(
+  data,    # OTU count dataframe of size n (samples) x p (OTUs)
+  percent = 0.0001  # cutoff percentage threshold
+) {
+  
+  # Check input type
+  if (!is.data.frame(data) && !is.matrix(data)) {
+    stop("`data` must be a dataframe or matrix of counts.", call. = FALSE)
+  }
+  
+  if (!all(sapply(data, is.numeric))) stop("All columns must be numeric.")
+
+  
+  # Identify OTUs above the relative abundance cutoff
+  keep.otu <- which(
+    colSums(data) * 100 / sum(colSums(data)) > percent
+  )
+  
+  # Filter the dataframe to keep only those OTUs
+  data.filter <- data[, keep.otu, drop = FALSE]
+  
+  # Return both filtered data and indices
+  return(list(
+    data.filter = data.filter,
+    keep.otu = keep.otu
+  ))
+}
+```
+
+## CLR Transformation of Abundance Data
+
+The function `clr.transformation()` applies a **centered log-ratio (CLR) transformation**
+to an abundance dataframe using the `logratio.transfo()` function from the **MixOmics** package.
+
+CLR is commonly used in compositional data analysis to transform relative abundance data
+into a form suitable for downstream analyses.
+
+**Arguments:**
+- `abundance.filtered`: Dataframe or matrix of filtered abundance values (OTUs as columns, samples as rows)
+- `offset_value`: Numeric value added to each entry to avoid taking log of zero
+
+**Returns:**
+- A dataframe of the CLR-transformed abundance values, with the same dimensions as input.
+```{r}
+clr.transformation <- function(abundance.filtered, offset_value) {
+  # Apply CLR transformation using MixOmics
+  # logratio.transfo requires a matrix input
+  data.clr <- logratio.transfo(
+    as.matrix(abundance.filtered),
+    logratio = "CLR",
+    offset = offset_value
+  )
+  
+  # Convert result to a regular dataframe
+  clr_mat <- unclass(data.clr)
+  clr_df <- as.data.frame(clr_mat)
+  
+  return(clr_df)
+}
+
+```
+
+
+## Preprocessing of Single Study Data
+
+The function `preprocess_single()` performs **preprocessing of a single study’s microbiome dataset**
+
+It filters, normalizes, and structures the input abundance and metadata tables to ensure consistency across datasets before multi-study integration.
+
+**Arguments:**
+- `meta`: Dataframe containing metadata. Rows correspond to samples, and columns include variables such as disease labels and other covariates.  
+- `abund`: Dataframe of raw or relative abundance data (samples as rows, taxa/OTUs as columns).  
+- `diseases`: Character vector specifying which disease groups to include for analysis. Samples with other disease labels are excluded.  
+- `keep_cols`: Character vector of metadata column names to retain in the output metadata.  
+- `percent`: Numeric value (0–100) specifying the threshold for **low-count removal** — taxa present in fewer than this percentage of samples are filtered out.  
+- `offset_value`: Numeric constant added to abundance values prior to **log or CLR transformation** to prevent taking the log of zero.
+
+**Returns:**
+Returns two options:
+If CLR = TRUE (default)
+- A **list** containing two elements:
+  - `$data`: The processed abundance dataframe after filtering, normalization, and transformation.  
+  - `$meta`: The corresponding filtered metadata dataframe aligned with `$data`.  
+If CLR = FALSE
+- A **matrix** containing disease selected abundance that has been split filtered. 
+```{r}
+preprocess_single <- function(meta, abund, diseases, keep_cols, percent, offset_value, CLR=TRUE) {
+  # 1. Filter metadata
+  filtered_meta <- filter_meta(meta, diseases, keep_cols)
+  #View(filtered_meta)
+  # 2. Select abundance rows that match filtered_meta
+  selected_abund <- as.data.frame(abund[rownames(abund) %in% rownames(filtered_meta), ])
+  #View(selected_abund)
+  # 3. Apply split count filtering
+  abundance_filtered <- split_count_filtering(selected_abund, diseases, percent, filtered_meta)
+  
+ if (!CLR) return(abundance_filtered)
+  # 5. Convert to matrix for CLR
+  abundance_matrix <- as.matrix(abundance_filtered)
+  
+  # 6. Apply CLR transformation
+  clr_transformed <- clr.transformation(abundance_matrix, offset_value)
+  #View(clr_transformed)
+  # 7. Return results
+  clr_transformeddf <- as.data.frame(clr_transformed)
+      return(list(
+    data = clr_transformeddf,
+    meta = filtered_meta
+  ))
+
+}
+```
+## Preprocessing Multiple Studies
+
+The function `preprocess_multiple()` applies `preprocess_single()` to each study in a list
+and combines the results into a single dataframe.
+
+**Arguments:**
+- `abundance_list`: Named list of abundance dataframes (samples × taxa).  
+- `meta_list`: Named list of metadata dataframes.  
+- `diseases`: Character vector of disease groups to include.  
+- `keep_cols`: Metadata columns to retain.  
+- `percent`: Threshold for low-count taxa removal.  
+- `offset_value`: Numeric offset for CLR/log transformation.  
+- `threshold`: Minimum number of studies a taxon must appear in to be retained.  
+
+**Returns:**
+- Combined dataframe with all samples, filtered taxa, metadata, and study.
+
+```{r}
+preprocess_multiple <- function(abundance_list, meta_list, diseases, keep_cols, percent, offset_value, threshold = NULL) {
+  results <- list()
+  # iterate through abund and meta lists to proprocess individually
+  for (nm in names(abundance_list)) {
+    abund <- abundance_list[[nm]]
+    meta  <- meta_list[[nm]]
+    result <- preprocess_single(meta, abund, diseases, keep_cols, percent, offset_value)
+    
+    # store it inside results under the dataset named results accessed by name
+    results[[nm]] <- list(
+      data = result$data,
+      meta = result$meta
+    )
+    cat("\n--- Dataset:", nm, "---\n")
+  print(dim(result$data))
+  # View(result$data)
+  # View(result$meta)
+  }
+  
+  combined <- integrate_filter(results, threshold)
+  return(combined)
+}
+
+```
+
+## Integrate Filtered Abundance Across Studies
+
+The function `integrate_filter()` combines multiple preprocessed studies into a single dataframe,
+retaining only taxa that appear in at least `threshold` studies.
+
+**Arguments:**
+- `results`: Named list of preprocessed study results, each with:
+  - `$data`: Abundance dataframe (samples × taxa)  
+  - `$meta`: Metadata dataframe  
+- `threshold`: Minimum number of studies a taxon must appear in to be retained.  
+
+**Returns:**
+- A combined dataframe containing filtered abundance, metadata, and a `study` column indicating the source study.
+
+```{r}
+integrate_filter <- function(results, threshold) {
+  
+  # Step 1: Determine taxa present above threshold across studies
+  taxa_present_list <- purrr::map(results, function(study) {
+    taxa_cols <- colnames(study$data)
+    present_taxa <- taxa_cols[
+      purrr::map_lgl(taxa_cols, ~ sum(study$data[[.x]], na.rm = TRUE) > 0)
+    ]
+    return(present_taxa)
+  })
+  
+  taxa_counts <- table(unlist(taxa_present_list))
+  surviving_taxa <- names(taxa_counts)[taxa_counts >= threshold]
+  
+  # Step 2: Filter each study
+  comb_data_list <- list()
+  meta_list <- list()
+  
+  
+  
+  
+final <- purrr::imap(results, function(study, study_name) {
+  
+  # Filter abundance to surviving taxa
+  abund_filtered <- study$data %>%
+    dplyr::select(any_of(surviving_taxa))
+  
+  # Preserve rownames
+  rownames(abund_filtered) <- rownames(study$data)
+  
+  # Filter metadata to match abundance rows
+  meta_filtered <- study$meta[rownames(abund_filtered), , drop = FALSE]
+  
+  # Return a nested list, automatically named by imap using study_name
+  list(
+    abund = abund_filtered,
+    meta = meta_filtered
+  )
+})
+
+ 
+  return(final)
+}
+```
+
+## Run Preprocessing on Single or Multiple Datasets
+
+The function `run_preprocessing()` automatically processes one or more datasets.  
+If a single dataset is provided, it calls `preprocess_single()`.  
+If multiple datasets are provided, it calls `preprocess_multiple()` and integrates them.
+
+**Arguments:**
+- `abundance_list`: Named list of abundance dataframes (samples × taxa)  
+- `meta_list`: Named list of corresponding metadata dataframes  
+- `diseases`: Character vector of disease labels to retain  
+- `keep_cols`: Metadata columns to keep  
+- `percent`: Low-count filtering threshold (percent)  
+- `offset_value`: Numeric offset for CLR transformation  
+- `threshold`: (Optional) Minimum number of studies a taxon must appear in (for multiple datasets)  
+
+**Returns:**
+- A processed abundance dataframe (CLR-transformed) combined with metadata.  
+```{r}
+run_preprocessing <- function(abundance_list, meta_list, diseases,
+                              keep_cols, percent, offset_value, threshold = NULL) {
+  # Check how many datasets are in the abundance list
+  if (length(abundance_list) == 1) {
+    print("single")
+    # Only one dataset → run preprocess_single
+    #how to access this type of database
+    abund <-  as.data.frame((abundance_list)[[1]])
+    meta  <- as.data.frame((meta_list)[[1]])
+    result <- preprocess_single(meta, abund, diseases, keep_cols, percent, offset_value)
+    
+  } else {
+    print("Multiple")
+    # Multiple datasets → run preprocess_combine (preprocess_multiple)
+    result <- preprocess_multiple(abundance_list, meta_list,
+                                 diseases, keep_cols, percent, offset_value, threshold)
+  }
+  return(result)
+}
+```
+
+
+
+
+
+## Testing with single dataset
+```{r}
+#testing with actual data
+rawdata <- curatedMetagenomicData("SankaranarayananK_2015.relative_abundance", dryrun = FALSE, counts = TRUE,rownames = "short"  )
+```
+
+```{r}
+## from treesummarisedexperiment data structure obtain raw_tse and abudance
+raw_tse <- rawdata[[1]]
+abund1 <- assay(raw_tse, "relative_abundance")
+
+# from raw_tse obtain meta data as dataframe
+meta1 <- as.data.frame(colData(raw_tse))
+
+# transcribe the dataframe abund so now the column names are row names and vice versa
+abund1_t <- as.data.frame(t(abund1))
+diseases <- c("Healthy", "T2D")
+keep_cols <- c("gender")
+result<- preprocess_single(meta = meta1, abund = abund1_t, diseases = diseases, keep_cols = keep_cols, percent = 0.0001, offset_value = 1, CLR=TRUE)
+```
+
+
+
+
+
+## testing with 6 datasets from paper
+```{r}
+# List of study names
+study_names <- c("FengQ_2015.relative_abundance", "HMP_2019_t2d.relative_abundance", 
+                 "KarlssonFH_2013.relative_abundance", "LiJ_2014.relative_abundance", 
+                 "YuJ_2015.relative_abundance", "SankaranarayananK_2015.relative_abundance")
+
+# Load and process each study
+abundance_lst <- lapply(study_names, function(study) {
+  rawdata <- curatedMetagenomicData(study, dryrun = FALSE, counts = TRUE, rownames = "short")
+  raw_tse <- rawdata[[1]]
+  abund <- assay(raw_tse, "relative_abundance")
+  as.data.frame(t(abund))
+})
+names(abundance_lst) <- study_names
+
+# Extract metadata for each study
+meta_lst <- lapply(study_names, function(study) {
+  rawdata <- curatedMetagenomicData(study, dryrun = FALSE, counts = TRUE, rownames = "short")
+  raw_tse <- rawdata[[1]]
+  as.data.frame(colData(raw_tse))
+})
+names(meta_lst) <- study_names
+keep_cols <-c("gender", "body_site")
+diseases <- c("Healthy", "T2D")
+```
+
+
+```{r}
+res<- run_preprocessing(abundance_list = abundance_lst, meta_list = meta_lst, diseases = diseases, keep_cols = keep_cols, percent = 0.01, offset_value = 1, threshold = 1)
+
+saveRDS(res, "res")
+```
+```{r}
+#exporting code
+saveRDS(res, "df")
+```
+
+
+
+
+## saving datasets for testing the original modelling code
+```{r}
+#testing with actual data
+rawdata1 <- curatedMetagenomicData("SankaranarayananK_2015.relative_abundance", dryrun = FALSE, counts = TRUE,rownames = "short"  )
+```
+
+```{r}
+## from treesummarisedexperiment data structure obtain raw_tse and abudance
+raw_tse1 <- rawdata1[[1]]
+
+
+abund1 <- assay(raw_tse1, "relative_abundance")
+
+# from raw_tse obtain meta data as dataframe
+meta1 <- as.data.frame(colData(raw_tse1))
+
+# transcribe the dataframe abund so now the column names are row names and vice versa
+abund1_t <- as.data.frame(t(abund1))
+diseases <- c("Healthy", "T2D")
+keep_cols <- c("gender")
+result1<- preprocess_single(meta = meta1, abund = abund1_t, diseases = diseases, keep_cols = keep_cols, percent = 0.0001, offset_value = 1, CLR=TRUE)
+
+
+saveRDS(result1, "sank_clr")
+```
+
+```{r}
+#testing with actual data
+rawdata2 <- curatedMetagenomicData("FengQ_2015.relative_abundance", dryrun = FALSE, counts = TRUE,rownames = "short"  )
+```
+
+```{r}
+## from treesummarisedexperiment data structure obtain raw_tse and abudance
+raw_tse2 <- rawdata2[[1]]
+abund2 <- assay(raw_tse2, "relative_abundance")
+
+# from raw_tse obtain meta data as dataframe
+meta2 <- as.data.frame(colData(raw_tse2))
+
+# transcribe the dataframe abund so now the column names are row names and vice versa
+abund2_t <- as.data.frame(t(abund2))
+diseases <- c("Healthy", "T2D")
+keep_cols <- c("gender")
+result2<- preprocess_single(meta = meta2, abund = abund2_t, diseases = diseases, keep_cols = keep_cols, percent = 0.0001, offset_value = 1, CLR=TRUE)
+saveRDS(result2$data, "feng_clr")
+```

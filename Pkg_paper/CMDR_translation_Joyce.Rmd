@@ -1,0 +1,156 @@
+```{r}
+library(curatedMetagenomicData)
+library(dplyr)
+library(DT)
+library(SummarizedExperiment)
+library(mixOmics)
+library(stringr)
+```
+
+```{r}
+## import treesummarisedexperiment data structure from CMD
+rawdata <- curatedMetagenomicData("SankaranarayananK_2015.relative_abundance", dryrun = FALSE, counts = TRUE,rownames = "short"  )
+```
+
+```{r}
+## from treesummarisedexperiment data structure obtain raw_tse and abundance
+raw_tse <- rawdata[[1]]
+abund <- assay(raw_tse, "relative_abundance")
+
+print(dim(abund))
+
+# convert abundance to matrix
+abund <- as.matrix(abund)
+
+# from raw_tse obtain meta data as dataframe
+meta <- as.data.frame(colData(raw_tse))
+```
+
+
+```{r}
+## use dplyr mutate to clean and filter disease column for only T2D and healthy
+
+meta_T2D_healthy <- meta %>%
+  mutate(disease = case_when(
+    str_detect(disease, regex("T2D", ignore_case = TRUE))     ~ "T2D",
+    str_detect(disease, regex("healthy", ignore_case = TRUE)) ~ "healthy",
+    TRUE ~ disease  
+  )) %>%
+  filter(disease %in% c("T2D", "healthy")) %>%
+  # Keep only disease and rownames
+  tibble::rownames_to_column(var = "SID") %>%  # moves rownames into a column
+  dplyr::select(SID, disease)
+
+```
+
+```{r}
+meta_T2D_healthy
+```
+
+
+
+```{r}
+## transpose abundance so rows are SIDs and columns are taxa, add disease state to the transposed dataframe. 
+
+#transpose abundance data frame
+t_abund <- t(abund)
+t_abund_df <- as.data.frame(t_abund)
+
+# filter (same as row.names)
+labelled_abund <- t_abund_df[rownames(t_abund_df) %in% meta_T2D_healthy$SID, ]
+colnames(labelled_abund)[colnames(labelled_abund) == "Row.names"] <- "SID"
+```
+
+```{r}
+labelled_abund
+```
+
+
+
+```{r}
+## low count removal function with cut off 0.01 %, copied from MixOmics website
+low.count.removal <- function(
+                        data, # OTU count df of size n (sample) x p (OTU)
+                        percent=0.0001 # cutoff chosen
+                        ) 
+  {
+    keep.otu = which(colSums(data)*100/(sum(colSums(data))) > percent)
+    data.filter = data[,keep.otu]
+    return(list(data.filter = data.filter, keep.otu = keep.otu))
+}
+```
+
+
+
+```{r}
+## subset tagged dataframe by disease column, pass each dataframe through low count removal, and find the union
+
+# subset by healthy and t2d using
+
+healthy_df <- labelled_abund %>%
+  tibble::rownames_to_column("SID") %>%
+  semi_join(meta_T2D_healthy %>% filter(disease == "healthy"), by = "SID") %>%
+  tibble::column_to_rownames("SID")
+
+t2d_df <- labelled_abund %>%
+  tibble::rownames_to_column("SID") %>%
+  semi_join(meta_T2D_healthy %>% filter(disease == "T2D"), by = "SID") %>%
+  tibble::column_to_rownames("SID")
+healthy_df
+t2d_df
+```
+
+
+
+
+```{r}
+# pass all numeric columns (excl. disease and SID) of healthy and t2d subset into low count removal
+cols_to_remove <- setdiff(colnames(healthy_df), c("disease", "SID"))
+healthy_res <- low.count.removal(healthy_df[, cols_to_remove])
+t2d_res     <- low.count.removal(t2d_df[, cols_to_remove])
+
+# find the union of taxa names
+taxa_union <- union(colnames(healthy_res$data.filter), colnames(t2d_res$data.filter))
+
+# filter the tagged dataframe to only contain union of taxa names above 0.01% count.
+labelled_abund_filtered <- labelled_abund[, taxa_union]
+
+```
+
+```{r}
+labelled_abund_filtered
+```
+
+
+```{r}
+## apply clr for the numeric data, and add on the SID and disease afterwards. 
+data.clr <- logratio.transfo(as.matrix(labelled_abund_filtered), logratio = 'CLR', offset = 1)
+clr_mat <- unclass(data.clr) 
+clr_df <- as.data.frame(clr_mat)
+# saving the df for colnames comparision
+# saveRDS(clr_df, "split_clr")
+
+
+#metadata <- labelled_abund[, c("SID", "disease")]
+#clr_with_metadata <- cbind(metadata, clr_mat)
+
+
+```
+
+```{r}
+labelled_abund
+```
+
+
+```{r}
+
+# saving files to R data for python comparision
+#abund_df <- as.data.frame(abund)
+#saveRDS(labelled_abund_filtered, "sankR_pre_clr)")
+#saveRDS(abund_df, "sankR_raw")
+
+
+```
+
+
+
