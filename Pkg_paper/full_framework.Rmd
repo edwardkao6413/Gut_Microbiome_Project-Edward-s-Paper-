@@ -4,19 +4,21 @@ output: html_document
 date: "2025-09-16"
 ---
 
-
 # Introduction
+
 Metagenomics sequencing technology becomes a crucial strategy to explore the microbial composition in specific environments, such as human gut, ocean water, or soil. In this tool, we develop an integrative workflow to analyze metagenomics data to identify the informative microbial species in a given environment. This study covers entire implementation details of workflow and provides step-by-step reproducible instructions for users to create their first metagenomics data processing workflow.
 
-
 # Packages installation
-Before beggining, Load all the functions of current pipeline from Function_Helpers.R file, where we put all the supporting helper functions.
+
+Before beginning, Load all the functions of current pipeline from Function_Helpers.R file, where we put all the supporting helper functions.
+
 ```{r}
 # setwd(dirname(rstudioapi::getSourceEditorContext()$path))
 source("Function_Helpers.R")
 ```
 
 First, we should load the required packages.
+
 ```{r}
 req_pkgs = c('dplyr', 'mixOmics', 'curatedMetagenomicData', 'SummarizedExperiment', 
              'stringr', 'testthat', 'tibble', 'stringr', 'purrr')
@@ -24,14 +26,16 @@ req_pkgs = c('dplyr', 'mixOmics', 'curatedMetagenomicData', 'SummarizedExperimen
 install_if_missing(req_pkgs)
 ```
 
-
 # Case Study Description and Data Loading
 
 ## Case study
-**Type II Diabetes (T2D)**  T2D is considered as an prevalent chronic disease for human beings. This study aims identify the important taxa where we can separate T2D and healthy individuals based on their abundance pattern. We collected relevant metagenomics datasets from CuratedmetaGenomicsData and HGMA, and integrated those datasets to uncover the discriminative microbial species between two populations.
+
+**Type II Diabetes (T2D)** T2D is considered as an prevalent chronic disease for human beings. This study aims identify the important taxa where we can separate T2D and healthy individuals based on their abundance pattern. We collected relevant metagenomics datasets from CuratedmetaGenomicsData and HGMA, and integrated those datasets to uncover the discriminative microbial species between two populations.
 
 ## Data Loading
-In current study, we used CuratedmetaGenomicData as our main data source to train our model, where CuratedmetaGenomicData fetched and processed the raw metagenomics data with consistent pipeline of same parameter, minimizing the technical variation. Here, we loaded the datasets from CuratedmetaGenomicData, and it is welcome to use datasets outside CuratedMetagenomicData. In this step, we loaded relative abundance and metadata of each assigned study relevant to T2D, including HMP_2019_t2d, KarlssonFH_2013, FengQ_2015, YuJ_2015, QinJ_2012, and LiJ_2014. All the available study codes are listed on the website (https://waldronlab.io/curatedMetagenomicData/articles/available-studies.html).
+
+In current study, we used CuratedmetaGenomicData as our main data source to train our model, where CuratedmetaGenomicData fetched and processed the raw metagenomics data with consistent pipeline of same parameter, minimizing the technical variation. Here, we loaded the datasets from CuratedmetaGenomicData, and it is welcome to use datasets outside CuratedMetagenomicData. In this step, we loaded relative abundance and metadata of each assigned study relevant to T2D, including HMP_2019_t2d, KarlssonFH_2013, FengQ_2015, YuJ_2015, QinJ_2012, and LiJ_2014. All the available study codes are listed on the website (<https://waldronlab.io/curatedMetagenomicData/articles/available-studies.html>).
+
 ```{r}
 studies = c("HMP_2019_t2d", "KarlssonFH_2013", "FengQ_2015", "QinJ_2012", 
             "SankaranarayananK_2015", "YuJ_2015", "LiJ_2014")
@@ -55,50 +59,49 @@ for (study in studies) {
 
 ```
 
-load metagenomics, introducing dataset (Table 1. overleaf format) introducing data then load datasets
-(put Table 1.)
+load metagenomics, introducing dataset (Table 1. overleaf format) introducing data then load datasets (put Table 1.)
 
 # Data Processing
+
 Before modeling, we conduct data processing to ensure the consistency in downstream analysis, including data filtering and data transformation
 
-## Data Filtering 
+## Data Filtering
+
 Due to the nature of metagenomics, we aim to reduce data sparsity and eliminate variables with near-zero variance by removing microbial taxa with a total relative abundance below 0.01% of the study-wide sum of abundance.
+
 ```{r}
 
 ```
 
 ## Data Transformation
+
 We first add the offset on the abundance matrix to suit the further mathematical transformation function "centered log-ratio (CLR)", and apply it to reduce the skewness of abundance data distribution.
+
 ```{r}
 
 ```
 
-
 # Model Development and Training
+
 After the data is ensured to suit the downstream analysis, we integrate individual datasets and train the model based on the integrative data.
 
 ## Data Integration
+
 ### Individual filtering (IF)
+
 ```{r}
 
 ```
 
 ### Forward selection (FS)
+
 ```{r}
 
 ```
 
-
-
 ## Multivariate Modelling
 
-
-
 # Model Testing
-
-
-
-
 
 # Biological Interpretation
 
@@ -106,14 +109,4 @@ After the data is ensured to suit the downstream analysis, we integrate individu
 
 Explain a bit of analysis results (DETAILs REFERS to paper)
 
-
-
-
 ## Hypergeometric Test
-
-
-
-
-
-
-

@@ -93,7 +93,7 @@ split_count_filtering <- function(labelled_abund, diseases, percent, filtered_me
     abundance_filtered <- as.data.frame(lapply(abundance_filtered, function(col) {
       if (is.list(col)) col <- unlist(col)
       as.numeric(col)
-    }), row.names = rownames(abundance_filtered))
+    }), row.names = rownames(abundance_filtered), check.names = FALSE)
   }
   #View(abundance_filtered)
   return(abundance_filtered)
@@ -143,7 +143,7 @@ clr.transformation <- function(abundance.filtered, offset_value) {
   
   # Convert result to a regular dataframe
   clr_mat <- unclass(data.clr)
-  clr_df <- as.data.frame(clr_mat)
+  clr_df <- as.data.frame(clr_mat, check.names = FALSE)
   
   return(clr_df)
 }
@@ -156,7 +156,7 @@ preprocess_single <- function(meta, abund, diseases, keep_cols, percent, offset_
   filtered_meta <- filter_meta(meta, diseases, keep_cols)
   #View(filtered_meta)
   # 2. Select abundance rows that match filtered_meta
-  selected_abund <- as.data.frame(abund[rownames(abund) %in% rownames(filtered_meta), ])
+  selected_abund <- as.data.frame(abund[rownames(abund) %in% rownames(filtered_meta), ], check.names = FALSE)
   #View(selected_abund)
   # 3. Apply split count filtering
   abundance_filtered <- split_count_filtering(selected_abund, diseases, percent, filtered_meta)
@@ -169,7 +169,7 @@ preprocess_single <- function(meta, abund, diseases, keep_cols, percent, offset_
   clr_transformed <- clr.transformation(abundance_matrix, offset_value)
   #View(clr_transformed)
   # 7. Return results
-  clr_transformeddf <- as.data.frame(clr_transformed)
+  clr_transformeddf <- as.data.frame(clr_transformed, check.names = FALSE)
   return(list(
     data = clr_transformeddf,
     meta = filtered_meta
@@ -261,8 +261,8 @@ run_preprocessing <- function(abundance_list, meta_list, diseases,
     #how to access this type of database
     # abund <-  as.data.frame((abundance_list)[[1]])
     # meta  <- as.data.frame((meta_list)[[1]])
-    abund <-  as.data.frame(abundance_list[[1]])
-    meta  <- as.data.frame(meta_list[[1]])
+    abund <-  as.data.frame(abundance_list[[1]], check.names = FALSE)
+    meta  <- as.data.frame(meta_list[[1]], check.names = FALSE)
     result <- preprocess_single(meta, abund, diseases, keep_cols, percent, offset_value)
     
   } else {

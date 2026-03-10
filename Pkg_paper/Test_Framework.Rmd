@@ -17,7 +17,6 @@ req_pkgs = c('dplyr', 'mixOmics', 'curatedMetagenomicData', 'SummarizedExperimen
 install_if_missing(req_pkgs) 
 ```
 
-
 ## Data Loading
 ```{r}
 study_names <- c("FengQ_2015.relative_abundance", "HMP_2019_t2d.relative_abundance", 
@@ -29,7 +28,8 @@ abundance_lst <- lapply(study_names, function(study) {
   rawdata <- curatedMetagenomicData(study, dryrun = FALSE, counts = TRUE, rownames = "short")
   raw_tse <- rawdata[[1]]
   abund <- assay(raw_tse, "relative_abundance")
-  as.data.frame(t(abund))
+  # Joyce: added checknames =false to prevent issues with inconsistent colnames later
+  as.data.frame(t(abund), check.names = FALSE)
 })
 
 ## output data: keys are study name, each col is taxa name
@@ -38,9 +38,85 @@ abundance_lst <- lapply(study_names, function(study) {
 meta_lst <- lapply(study_names, function(study) {
   rawdata <- curatedMetagenomicData(study, dryrun = FALSE, counts = TRUE, rownames = "short")
   raw_tse <- rawdata[[1]]
-  as.data.frame(colData(raw_tse))
+  as.data.frame(colData(raw_tse), check.names = FALSE)
 })
+```
 
+```{r}
+# feature alignment for taxa names
+align_columns <- function(p_test, p_selected) {
+  
+  # Remove 'species:' prefix from column names
+  colnames(p_selected) <- sub("^species:\\s*", "", colnames(p_selected), ignore.case = TRUE)
+  colnames(p_test) <- sub("^species:\\s*", "", colnames(p_test), ignore.case = TRUE)
+  
+  change_log <- list()
+  message_log <- character()  # Collect messages for single matches
+  
+  for (i in seq_along(colnames(p_test))) {
+    
+    col_test <- colnames(p_test)[i]
+    
+    # Only process test columns with '/'
+    if (grepl("/", col_test, fixed = TRUE)) {
+      
+      taxa_test <- trimws(unlist(strsplit(col_test, "/", fixed = TRUE)))
+      matched_train_cols <- c()
+      
+      # Find matching train columns
+      for (col_train in colnames(p_selected)) {
+        taxa_train <- trimws(unlist(strsplit(col_train, "/", fixed = TRUE)))
+        if (all(taxa_train %in% taxa_test)) {
+          matched_train_cols <- c(matched_train_cols, col_train)
+        }
+      }
+      
+      # Handle matches
+      if (length(matched_train_cols) == 1) {
+        old_name <- col_test
+        colnames(p_test)[i] <- matched_train_cols[1]
+        change_log[[old_name]] <- paste0("Single match: renamed test column to '", matched_train_cols[1], "'")
+        
+        # Add to message log
+        message_log <- c(
+          message_log,
+          paste0("Single match found: test column '", old_name, "' renamed to '", matched_train_cols[1], "'")
+        )
+        
+      } else if (length(matched_train_cols) > 1) {
+        new_train_col <- paste(matched_train_cols, collapse = "/")
+        
+        # Create combined column in p_selected if needed
+        if (!(new_train_col %in% colnames(p_selected))) {
+          p_selected[[new_train_col]] <- rowSums(p_selected[, matched_train_cols, drop = FALSE])
+          change_log[[paste0("p_selected: ", new_train_col)]] <- paste0(
+            "Created new combined column from: ", paste(matched_train_cols, collapse = ", ")
+          )
+        }
+        
+        old_name <- col_test
+        colnames(p_test)[i] <- new_train_col
+        change_log[[old_name]] <- paste0(
+          "Multiple matches: renamed test column to '", new_train_col, "'"
+        )
+      }
+      # No matches → leave unchanged
+    }
+  }
+  
+  # Align training and testing datasets
+  common_cols <- intersect(colnames(p_selected), colnames(p_test))
+  training <- p_selected[, common_cols, drop = FALSE]
+  testing <- p_test[, common_cols, drop = FALSE]
+  
+  # Combine message log into a single variable
+  all_messages <- paste(message_log, collapse = "\n")
+  
+  return(list(training = training, testing = testing, change_log = change_log, messages = all_messages))
+}
+```
+
+```{r}
 # change the study name so users can read it easily.
 study_names_v2 = c()
 for (i in 1:length(strsplit(study_names, "\\.")) ) {
@@ -68,6 +144,137 @@ result <- individual_filtering(res, dist="centroids.dist", ncomp=2, err_thres = 
 names(result)
 ```
 
+## getting combined rawdata based on taxa from CMD filtering and studies from forward selection 
+```{r}
+library(dplyr)
+
+# extract study names
+studies <- names(result)
+
+# subset raw abundance data per study
+subset_raw_lst <- lapply(studies, function(study) {
+
+  # processed abundance (from previous function)
+  abund_proc <- result[[study]]$abund
+
+  # raw abundance data
+  abund_raw <- abundance_lst[[study]]
+
+  # rows (samples) and columns (taxa) to keep
+  rows_keep <- rownames(abund_proc)
+  cols_keep <- colnames(abund_proc)
+
+  # strict checks: all must exist
+  stopifnot(
+    all(rows_keep %in% rownames(abund_raw)),
+    all(cols_keep %in% colnames(abund_raw))
+  )
+
+  # subset raw data by rows AND columns
+  abund_raw[
+    rows_keep,
+    cols_keep,
+    drop = FALSE
+  ]
+})
+
+# bind all studies by rows
+p_selected <- bind_rows(subset_raw_lst)
+```
+
+## testing implementation of taxa renmaing 
+```{r}
+p_test <- readRDS("p_test")
+align_columns(p_test, p_selected)
+```
+
+## raw code testing 
+```{r}
+p_test <- readRDS("p_test")
+colnames(p_selected) <- sub("^species:\\s*", "", colnames(p_selected), ignore.case = TRUE)
+# 1: Initialize message log
+change_log <- list()
+
+# 2: Loop over columns of p_test
+for (i in seq_along(colnames(p_test))) {
+  
+  col_test <- colnames(p_test)[i]
+  
+  # Only process columns that contain '/'
+  if (grepl("/", col_test, fixed = TRUE)) {
+    
+    # Step 2a: Split test column into taxa and trim whitespace
+    taxa_test <- trimws(unlist(strsplit(col_test, "/", fixed = TRUE)))
+    
+    # Step 2b: Find matching train columns (p_selected)
+    matched_train_cols <- c()
+    
+    for (col_train in colnames(p_selected)) {
+      taxa_train <- trimws(unlist(strsplit(col_train, "/", fixed = TRUE)))  # works if no '/'
+      
+      if (all(taxa_train %in% taxa_test)) {
+        matched_train_cols <- c(matched_train_cols, col_train)
+      }
+    }
+    
+    # Step 2c: Handle matches
+    if (length(matched_train_cols) == 1) {
+      # Single match → rename p_test column
+      old_name <- col_test
+      colnames(p_test)[i] <- matched_train_cols[1]
+      change_log[[old_name]] <- paste0("Single match: renamed test column to '", matched_train_cols[1], "'")
+      
+      # Print only for single matches
+      cat("\nSingle match found:\n")
+      cat("  Test column:", old_name, "\n")
+      cat("  Matched train column:", matched_train_cols[1], "\n")
+      cat("  Action: renamed test column to", matched_train_cols[1], "\n")
+      
+    } else if (length(matched_train_cols) > 1) {
+      # Multiple matches → create combined column in p_selected
+      new_train_col <- paste(matched_train_cols, collapse = "/")
+      
+      # Only create new column if it does not already exist
+      if (!(new_train_col %in% colnames(p_selected))) {
+        p_selected[[new_train_col]] <- rowSums(p_selected[, matched_train_cols, drop = FALSE])
+        change_log[[paste0("p_selected: ", new_train_col)]] <- paste0(
+          "Created new combined column from: ", paste(matched_train_cols, collapse = ", ")
+        )
+      }
+      
+      # Rename p_test column to match new_train_col
+      old_name <- col_test
+      colnames(p_test)[i] <- new_train_col
+      change_log[[old_name]] <- paste0(
+        "Multiple matches: renamed test column to '", new_train_col, "'"
+      )
+    }
+    
+    # If no matches, leave column unchanged (no print)
+  }
+}
+
+# 3: Outputs
+cat("\n---\nFinal column names in p_test:\n")
+print(colnames(p_test))
+
+cat("\nFinal column names in p_selected:\n")
+print(colnames(p_selected))
+
+cat("\nChange log:\n")
+print(change_log)
+```
+
+
+
+
+
+
+
+
+
+
+
 
 
 ### Forward selection
@@ -84,6 +291,9 @@ for (name in names(result)) {
 }
 # binding together
 result_df = bind_rows(result)
+# saveRDS here for schema level feature alignment
+saveRDS(result_df$abund, "p_selected")
+
 ab.mint.splsda = tune(method = "mint.splsda", X = result_df$abund, Y = as.factor(result_df$meta$disease), ncomp = 2, folds=5, nrepeat=10,
                       study = as.factor(result_df$meta$study), test.keepX = seq(10, ncol(result_df$abund), 1), validation = 'Mfold', dist = "centroids.dist") 
 plot(ab.mint.splsda)
@@ -119,7 +329,7 @@ dim(as.data.frame(result_df$meta$study))
 # testset1 = draw_TestSet(dataset_study="PRJEB1786")
 # testset2 = draw_TestSet(dataset_study="PRJNA422434")
 testset1_obj = readRDS("PRJEB1786.rds")
-testset2_obj = readRDS("PRJNA422434.rds")
+#testset2_obj = readRDS("PRJNA422434.rds")
 keep_cols <-c("Gender", "sample.ID")
 diseases <- c("Healthy", "T2D", "NGT")
 
@@ -130,13 +340,21 @@ x <- x[x > 0]
 second_smallest <- sort(unique(x), na.last = NA)[2]
 
 
-abundance_lst_test = list(test1 = test_obj$abund)
-meta_lst_test = list(test1 = test_obj$meta)
+#abundance_lst_test = list(test1 = test_obj$abund)
+#meta_lst_test = list(test1 = test_obj$meta)
+
+## instead of run_preprocessing we loop through pre_process single and then integrate filter to get counts without CLR
+testset <- preprocess_single(meta=testset1_obj$meta, abund = testset1_obj$abund, diseases = diseases, keep_cols = keep_cols, percent = 0.01, offset_value = second_smallest, CLR=FALSE)
 
 
-testset<- run_preprocessing(abundance_list = abundance_lst_test, meta_list = meta_lst_test, diseases = diseases, keep_cols = keep_cols, percent = 0.01, offset_value = second_smallest, threshold = 1)
+
+#testset<- run_preprocessing(abundance_list = abundance_lst_test, meta_list = meta_lst_test, diseases = diseases, keep_cols = keep_cols, percent = 0.01, offset_value = second_smallest, threshold = 1)
+
+
+
+
 common_taxa = intersect( names(result_df$abund), names(testset$data) )
-
+# add the renaming logic here with edits
 # common_taxa = intersect( names(result_df$abund), names(testset$data) )
 new_train = result_df$abund[, common_taxa, drop=F]
 new_test = testset$data[, common_taxa, drop=F]
@@ -170,7 +388,11 @@ conf_mat_c1
 conf_mat_c2
 ```
 
-
+## train model on overlap data frame and use testing set to validate performance
+## make sure they have the same columns 
+training=a, b
+testing a/b --> maybe include this as two columns?
+## look at confusion matrix
 
 
 
