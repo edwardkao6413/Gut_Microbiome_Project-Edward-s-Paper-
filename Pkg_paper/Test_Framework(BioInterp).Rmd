@@ -1,0 +1,141 @@
+---
+title: "Test_Framework"
+output: html_document
+date: "2025-11-29"
+---
+
+```{r}
+rm(list=ls()) 
+source("Function_Helpers.R")
+```
+
+# Packages installation
+```{r}
+req_pkgs = c('dplyr', 'mixOmics', 'curatedMetagenomicData', 'SummarizedExperiment', 
+             'stringr', 'testthat', 'tibble', 'stringr', 'purrr')
+
+install_if_missing(req_pkgs) 
+```
+
+## Data Loading
+```{r}
+study_names <- c("FengQ_2015.relative_abundance", "KarlssonFH_2013.relative_abundance", "LiJ_2014.relative_abundance", 
+                 "YuJ_2015.relative_abundance", "SankaranarayananK_2015.relative_abundance")
+
+# Load and process each study
+abundance_lst <- lapply(study_names, function(study) {
+  rawdata <- curatedMetagenomicData(study, dryrun = FALSE, counts = TRUE, rownames = "short")
+  raw_tse <- rawdata[[1]]
+  abund <- assay(raw_tse, "relative_abundance")
+  # Joyce: added checknames =false to prevent issues with inconsistent colnames later
+  as.data.frame(t(abund), check.names = FALSE)
+})
+
+## output data: keys are study name, each col is taxa name
+
+# Extract metadata for each study
+meta_lst <- lapply(study_names, function(study) {
+  rawdata <- curatedMetagenomicData(study, dryrun = FALSE, counts = TRUE, rownames = "short")
+  raw_tse <- rawdata[[1]]
+  as.data.frame(colData(raw_tse), check.names = FALSE)
+})
+
+```
+
+
+```{r}
+# change the study name so users can read it easily.
+study_names_v2 = c()
+for (i in 1:length(strsplit(study_names, "\\.")) ) {
+  study_names_v2[i] = strsplit(study_names, "\\.")[[i]][1]
+}
+
+names(abundance_lst) <- study_names_v2  
+names(meta_lst) <- study_names_v2
+```
+
+
+## Data Processing
+```{r}
+keep_cols <-c("gender", "body_site")
+diseases <- c("Healthy", "T2D")
+res<- run_preprocessing(abundance_list = abundance_lst, meta_list = meta_lst, diseases = diseases, keep_cols = keep_cols, percent = 0.01, offset_value = 1, threshold = 1)
+```
+
+# Model Development and Training
+## Data Integration
+### Individual filtering
+```{r}
+# CMD_filtered = readRDS("res")
+result <- individual_filtering(res, dist="centroids.dist", ncomp=2, err_thres = 0.5)
+print("Individual Filtering:")
+names(result)
+```
+
+### Forward selection
+```{r}
+result = forward_selection(res, dist="centroids.dist", ncomp=2)
+print("Forward Selection:")
+names(result)
+```
+
+## Modelling
+```{r}
+## Assemble integrative dataset from forward-selected studies
+for (name in names(result)) {
+  result[[name]]$meta$study = strsplit(name, '\\.')[[1]][1]
+}
+# Bind all selected studies into a single data frame
+result_df = bind_rows(result)
+
+# [UPDATED] p_selected stays as in-memory variable; result_df$abund is used directly downstream
+p_selected_fs <- result_df$abund  # forward-selected CLR-transformed training abundance
+
+# Prepare model inputs — study must exist in calling environment for run_mint()
+X     <- result_df$abund
+Y     <- as.factor(result_df$meta$disease)
+study <- as.factor(result_df$meta$study)
+
+
+# [UPDATED] Sequential tuning via run_mint(): comp 1 first, then comp 2 with already.tested.X
+# run_mint() reads `study` from the calling environment
+mint_results <- run_mint(X = X, Y = Y, ncomp = 2, dist = "centroids.dist")
+plot_mint_results(mint_results, Y = Y, study = study)
+```
+
+```{r}
+## Confusion matrix for training set
+predict.splsda.null <- predict(mint_results$model, newdata = X,
+                               dist = "centroids.dist", study.test = study)
+
+conf_mat_c1 = get.confusion_matrix(truth = result_df$meta$disease, predicted = predict.splsda.null$class$centroids.dist[, 1])
+conf_mat_c2 = get.confusion_matrix(truth = result_df$meta$disease, predicted = predict.splsda.null$class$centroids.dist[, 2])
+conf_mat_c1
+conf_mat_c2
+```
+
+
+
+
+
+
+```{r}
+# [ORIGINAL] Diagnostic dim checks — redundant now that X, Y, study are assigned above before run_mint()
+# X = result_df$abund; Y = as.factor(result_df$meta$disease)
+# dim(result_df$abund)
+# dim(as.data.frame(result_df$meta$disease))
+# dim(as.data.frame(result_df$meta$study))
+```
+
+
+
+## train model on overlap data frame and use testing set to validate performance
+## make sure they have the same columns 
+training=a, b
+testing a/b --> maybe include this as two columns?
+## look at confusion matrix
+
+
+
+
+
