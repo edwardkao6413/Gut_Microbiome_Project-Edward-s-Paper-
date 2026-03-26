@@ -416,7 +416,7 @@ calculate_multipleDB_BER = function(lst, ncomp=2, study_col="study", validation=
 
 ## Forward Selection
 # data: study pool
-forward_selection = function(data, ncomp=2, study_col="study", validation='Mfold', folds=5, nrepeat=10, 
+forward_selection = function(data, ncomp=2, study_col="study", validation='Mfold', folds=5, nrepeat=20, 
                              dist="centroids.dist", n_taxa=1) {
   remain_studies = list()   # studies included in combination
   i = 0  # calculate round
@@ -645,6 +645,184 @@ draw_TestSet = function(threshold_for_LowCountsRm=0.01, disease_lst=c("T2D", "He
 }
 
 
+## Feature alignment: CMD (training) vs HGMA (testing) column names
+# Promoted from Test_Framework.Rmd — Edward Kao, 2025
+# Strips 'species:' prefix from both matrices, then resolves HGMA '/' alias columns
+# against CMD training column names. Returns aligned training and testing matrices
+# containing only their common taxa, plus a change_log of all renames performed.
+align_columns <- function(p_test, p_selected) {
 
+  # Remove 'species:' prefix from column names
+  colnames(p_selected) <- sub("^species:\\s*", "", colnames(p_selected), ignore.case = TRUE)
+  colnames(p_test)     <- sub("^species:\\s*", "", colnames(p_test),     ignore.case = TRUE)
+
+  change_log  <- list()
+  message_log <- character()
+
+  for (i in seq_along(colnames(p_test))) {
+
+    col_test <- colnames(p_test)[i]
+
+    # Only process test columns that contain '/'
+    if (grepl("/", col_test, fixed = TRUE)) {
+
+      taxa_test         <- trimws(unlist(strsplit(col_test, "/", fixed = TRUE)))
+      matched_train_cols <- c()
+
+      # Find matching training columns
+      for (col_train in colnames(p_selected)) {
+        taxa_train <- trimws(unlist(strsplit(col_train, "/", fixed = TRUE)))
+        if (all(taxa_train %in% taxa_test)) {
+          matched_train_cols <- c(matched_train_cols, col_train)
+        }
+      }
+
+      # Single match → rename p_test column to the training name
+      if (length(matched_train_cols) == 1) {
+        old_name            <- col_test
+        colnames(p_test)[i] <- matched_train_cols[1]
+        change_log[[old_name]] <- paste0("Single match: renamed test column to '", matched_train_cols[1], "'")
+        message_log <- c(message_log,
+          paste0("Single match found: test column '", old_name, "' renamed to '", matched_train_cols[1], "'"))
+
+      # Multiple matches → sum matched training columns into one combined column
+      } else if (length(matched_train_cols) > 1) {
+        new_train_col <- paste(matched_train_cols, collapse = "/")
+
+        if (!(new_train_col %in% colnames(p_selected))) {
+          p_selected[[new_train_col]] <- rowSums(p_selected[, matched_train_cols, drop = FALSE])
+          change_log[[paste0("p_selected: ", new_train_col)]] <- paste0(
+            "Created new combined column from: ", paste(matched_train_cols, collapse = ", "))
+        }
+
+        old_name            <- col_test
+        colnames(p_test)[i] <- new_train_col
+        change_log[[old_name]] <- paste0("Multiple matches: renamed test column to '", new_train_col, "'")
+      }
+      # No match → leave column name unchanged
+    }
+  }
+
+  # Subset both matrices to their common taxa
+  common_cols <- intersect(colnames(p_selected), colnames(p_test))
+  training    <- p_selected[, common_cols, drop = FALSE]
+  testing     <- p_test[,     common_cols, drop = FALSE]
+
+  return(list(
+    training   = training,
+    testing    = testing,
+    change_log = change_log,
+    messages   = paste(message_log, collapse = "\n")
+  ))
+}
+
+
+## MINT sPLS-DA modelling: sequential hyperparameter tuning + model fitting + evaluation
+# Promoted from Joyce/modelling.Rmd — Joyce Hu, 2025
+# Tunes comp 1 first, then comp 2 using already.tested.X (mixOmics best-practice).
+# study must exist in the calling environment as a factor vector (one entry per sample).
+# Returns: model, optimal.keepX, performance, selected features per component, all unique features.
+run_mint <- function(X, Y, ncomp = 2, dist = "centroids.dist", nrepeat_perf=20, fold_perf=5) {
+
+  # STEP 1: Tune component 1
+  tune.comp1 <- tune(method = "mint.splsda",
+                     X = X, Y = Y, study = study,
+                     ncomp = 1,
+                     test.keepX = seq(10, ncol(X), 1),
+                     dist = dist)
+
+  optimal.comp1 <- tune.comp1$choice.keepX
+  cat("Optimal keepX for Component 1:", optimal.comp1, "\n\n")
+  plot(tune.comp1, main = "Component 1 Tuning")
+
+  # STEP 2: Tune component 2, conditioning on optimal comp 1
+  cat("Step 2: Tuning Component 2...\n")
+  tune.comp2 <- tune(method = "mint.splsda",
+                     X = X, Y = Y, study = study,
+                     ncomp = 2,
+                     test.keepX = seq(10, ncol(X), 1),
+                     already.tested.X = optimal.comp1,
+                     dist = dist)
+
+  optimal.comp2 <- tune.comp2$choice.keepX[2]
+  cat("Optimal keepX for Component 2:", optimal.comp2, "\n\n")
+  plot(tune.comp2, main = "Component 2 Tuning")
+
+  optimal.keepX <- c(optimal.comp1, optimal.comp2)
+
+  # STEP 3: Build final model
+  cat("Step 3: Building final model...\n")
+  cat("Using keepX =", paste(optimal.keepX, collapse = ", "), "\n\n")
+
+  model <- mint.splsda(X = X, Y = Y, study = study,
+                       ncomp = ncomp,
+                       keepX = optimal.keepX)
+
+  # STEP 4: Evaluate model (leave-one-study-out CV — default for MINT)
+  cat("Step 4: Evaluating model...\n")
+  perf <- perf(model, validation="Mfolds", folds=fold_perf, nrepeat=nrepeat_perf, dist=dist)
+
+  cat("\nBalanced Error Rate (BER):\n")
+  print(perf$global.error$BER)
+
+  cat("\nError Rate per Class:\n")
+  print(perf$global.error$error.rate.class)
+
+  # Extract selected taxa for each component
+  selected.comp1 <- selectVar(model, comp = 1)$name
+  selected.comp2 <- selectVar(model, comp = 2)$name
+  ttl_taxa <- tolower(unique(c(selected.comp1, selected.comp2)))
+
+  results <- list(
+    model                  = model,
+    optimal.keepX          = optimal.keepX,
+    performance            = perf,
+    selected.features.comp1 = selected.comp1,
+    selected.features.comp2 = selected.comp2,
+    features.all           = ttl_taxa
+  )
+
+  return(results)
+}
+
+
+## MINT sPLS-DA visualisation: score plot + loadings for both components
+# Promoted from Joyce/modelling.Rmd — Joyce Hu, 2025
+# results: output list from run_mint(); Y: disease factor; study: study factor
+plot_mint_results <- function(results, Y, study) {
+
+  model <- results$model
+
+  # Score plot (samples coloured by disease, shaped by study)
+  plotIndiv(model,
+            group = Y,
+            pch = as.numeric(factor(study)) + 13,
+            pch.levels = study,
+            title = 'MINT sPLS-DA',
+            legend = TRUE,
+            legend.title = 'Disease',
+            legend.title.pch = 'Study',
+            ellipse = TRUE)
+
+  # Loadings — Component 1
+  plotLoadings(model,
+               comp = 1,
+               legend = TRUE,
+               contrib = 'max',
+               title = 'Feature Loadings - Component 1',
+               method = 'median',
+               ndisplay = 20)
+  legend("topright", legend = levels(Y), fill = c("orange", "blue"))
+
+  # Loadings — Component 2
+  plotLoadings(model,
+               comp = 2,
+               legend = TRUE,
+               contrib = 'max',
+               title = 'Feature Loadings - Component 2',
+               method = 'median',
+               ndisplay = 20)
+  legend("topright", legend = levels(Y), fill = c("orange", "blue"))
+}
 
 
