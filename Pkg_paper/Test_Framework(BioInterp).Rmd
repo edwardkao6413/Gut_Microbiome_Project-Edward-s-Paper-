@@ -82,6 +82,7 @@ meta_lst <- lapply(study_names, function(study) {
 ```
 
 
+
 ```{r}
 # study_names_v2: shortened study names (strip ".relative_abundance" suffix)
 # e.g. "FengQ_2015.relative_abundance" → "FengQ_2015"
