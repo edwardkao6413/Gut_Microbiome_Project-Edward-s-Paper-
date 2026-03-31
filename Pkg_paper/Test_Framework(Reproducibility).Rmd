@@ -12,7 +12,7 @@ source("Function_Helpers.R")
 # Packages installation
 ```{r}
 req_pkgs = c('dplyr', 'mixOmics', 'curatedMetagenomicData', 'SummarizedExperiment', 
-             'stringr', 'testthat', 'tibble', 'stringr', 'purrr')
+             'stringr', 'testthat', 'tibble', 'stringr', 'purrr', 'openxlsx')
 
 install_if_missing(req_pkgs) 
 ```
@@ -140,19 +140,15 @@ res<- run_preprocessing(abundance_list = abundance_lst, meta_list = meta_lst, di
 ## Data Integration
 ### Individual filtering
 ```{r}
-# CMD_filtered = readRDS("res")
-result <- individual_filtering(res, dist="centroids.dist", ncomp=2, err_thres = 0.5)
-names(result)
+result_individual <- individual_filtering(res, dist="centroids.dist", ncomp=2, err_thres = 0.5)
+print("Individual Filtering — selected studies:")
+individual_studies = names(result_individual)  # prints the names of studies that passed the filter
+individual_studies
 ```
 
-## getting combined rawdata based on taxa from CMD filtering and studies from forward selection 
 ```{r}
-
-# extract study names
-studies <- names(result)
-
 # subset raw abundance data per study
-subset_raw_lst <- lapply(studies, function(study) {
+individual_raw_lst <- lapply(individual_studies, function(study, result) {
 
   # processed abundance (from previous function)
   abund_proc <- result[[study]]$abund
@@ -176,12 +172,55 @@ subset_raw_lst <- lapply(studies, function(study) {
     cols_keep,
     drop = FALSE
   ]
-})
+}, result = result_individual)
 
 # bind all studies by rows
-p_selected <- bind_rows(subset_raw_lst)
+p_select_individual <- bind_rows(individual_raw_lst)  
 ```
 
+
+## Forward selection
+```{r}
+result_forward = forward_selection(res, dist="centroids.dist", ncomp=2)
+print("Forward Selection — selected studies:")
+forward_studies = names(result_forward)  # prints which studies were selected in the final combination
+forward_studies
+```
+
+```{r}
+## getting combined rawdata based on taxa from CMD filtering and studies from forward selection
+# subset raw abundance data per study
+forward_raw_lst <- lapply(forward_studies, function(study, result) {
+
+  # processed abundance (from previous function)
+  abund_proc <- result[[study]]$abund
+
+  # raw abundance data
+  abund_raw <- abundance_lst[[study]]
+
+  # rows (samples) and columns (taxa) to keep
+  rows_keep <- rownames(abund_proc)
+  cols_keep <- colnames(abund_proc)
+
+  # strict checks: all must exist
+  stopifnot(
+    all(rows_keep %in% rownames(abund_raw)),
+    all(cols_keep %in% colnames(abund_raw))
+  )
+
+  # subset raw data by rows AND columns
+  abund_raw[
+    rows_keep,
+    cols_keep,
+    drop = FALSE
+  ]
+}, result = result_forward)
+
+p_select_forward <- bind_rows(forward_raw_lst)  
+```
+
+
+# testing
 ## testing implementation of taxa renmaing
 ```{r}
 # [ORIGINAL] Loaded p_test from dedicated RDS file saved by HGMA_Processing.Rmd
@@ -189,7 +228,7 @@ p_selected <- bind_rows(subset_raw_lst)
 
 # [UPDATED] Load HGMA abundance directly from PRJEB1786.rds (same taxa column names; no p_test RDS needed)
 p_test <- readRDS("PRJEB1786.rds")$abund
-align_columns(p_test, p_selected)
+align_columns(p_test, p_select_forward)
 ```
 
 ## raw code testing
