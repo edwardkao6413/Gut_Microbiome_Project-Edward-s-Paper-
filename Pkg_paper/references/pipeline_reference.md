@@ -4,7 +4,7 @@
 **Researcher**: Edward Kao (Pei-Hsiu Kao), MSc Bioinformatics, University of Melbourne
 **Supervisors**: Prof Kim-Anh Lê Cao, Dr Saritha Kodikara, Dr Yiwen Wang
 **Collaborator**: Joyce Hu (co-developer, helper functions and preprocessing)
-**Last updated**: 2026-03-28
+**Last updated**: 2026-04-04
 
 ---
 
@@ -36,23 +36,37 @@ It covers:
 
 **Solution**: The MINT (Multivariate INTegrative) framework accounts for batch effects by modelling study as a blocking factor inside the multivariate model, without requiring identical taxa across studies.
 
-### The five pipeline layers
+### Pipeline flow (from Research_Structure.jpg)
 
 ```
-Data Loading
-    ↓
-Layer 1 – Preprocessing      (run_preprocessing)
-    ↓
-Layer 2 – Individual Filtering  (individual_filtering)
-    ↓
-Layer 3 – Forward Selection     (forward_selection)
-    ↓
-Layer 4 – MINT Modelling        (run_mint)
-    ↓
-Layer 5 – Evaluation            (perf inside run_mint; confusion matrices)
+CMD (5 studies: Feng2015, Karl2013, LiJ2014, YuJ2015, Sank2015)
+       ↓  [HMP2019 discarded]
+  Data Loading
+       ↓
+  Preprocessing per study      (run_preprocessing)
+  [offset → low counts removal → CLR]
+       ↓
+  ┌────────────┬─────────────────┐
+  ↓            ↓
+  Forward      Individual
+  Selection    Filtering
+  (Layer 3)    (Layer 2)
+       ↓            ↓
+  FS model     IF model
+  (run_mint)   (run_mint)
+  └─ choose lower BER ─┘
+         ↓
+     Final Model
+  ┌──────────────────┐
+  ↓                  ↓
+Biological       Generalisation
+Interpretation   (align_columns → test on HGMA)
 ```
 
-Layer 1 prepares each study independently. Layers 2–3 select which studies to integrate. Layers 4–5 build and evaluate the final integrative model.
+Both strategies (Forward Selection and Individual Filtering) are run. The one with lower BER is the Final Model. Post-modelling splits into two parallel branches: Biological Interpretation (training data analysis) and Generalisation (external validation on HGMA).
+
+**Training studies (5):** FengQ_2015, KarlssonFH_2013, LiJ_2014, YuJ_2015, SankaranarayananK_2015
+**Testing studies (2):** PRJEB1786 (Swedish), PRJNA422434 (Chinese) — testing set only, never used in training
 
 ---
 
@@ -60,7 +74,7 @@ Layer 1 prepares each study independently. Layers 2–3 select which studies to 
 
 ### Training data — CuratedMetagenomicData (CMD) v3.16.1
 
-Five studies are used as training cohorts. Each is loaded with `curatedMetagenomicData()`:
+**Five** studies are used as training cohorts. **HMP_2019_t2d is confirmed DISCARDED** (per Research_Structure.jpg). Each is loaded with `curatedMetagenomicData()`:
 
 | Study name (short) | CMD query string | Population | Notes |
 |---|---|---|---|
@@ -74,14 +88,26 @@ CMD taxa names include a `"species: "` prefix (e.g. `"species: Bacteroides unifo
 
 ### Testing data — Human Gut Microbiome Atlas (HGMA)
 
-Two external studies used for generalisability evaluation:
+Two external studies used for generalisability evaluation. Loaded directly from pre-built `.rds` files (no longer built via `draw_TestSet()`):
 
 | BioProject | Population | File used |
 |---|---|---|
-| PRJEB1786 | Swedish | `vect_atlas.csv`, `sample_metadata.xlsx`, `corresponding_taxa.csv` |
-| PRJNA422434 | Chinese | Same files |
+| PRJEB1786 | Swedish | `PRJEB1786.rds` — pre-built by `HGMA_Processing.Rmd` |
+| PRJNA422434 | Chinese | `PRJNA422434.rds` — pre-built by `HGMA_Processing.Rmd` |
 
-HGMA taxa are indexed by numeric IDs in `vect_atlas.csv` and mapped to species names via `corresponding_taxa.csv`. Some HGMA species names use `/` to indicate multiple possible identities (e.g. `"Firmicutes bacterium CAG:65 / [Clostridium] sp. 2789STDY5608883"`).
+HGMA taxa are indexed by numeric IDs and mapped to species names via `corresponding_taxa.csv`. Some HGMA species names use `/` to indicate multiple possible identities (e.g. `"Firmicutes bacterium CAG:65 / [Clostridium] sp. 2789STDY5608883"`). These are resolved by `align_columns()`.
+
+### Reference Papers
+
+Key papers for the statistical methods used in this pipeline:
+
+| File | Content |
+|---|---|
+| `references/model_paper/MINT.pdf` | Rohart et al. 2017 — the MINT method paper |
+| `references/model_paper/MINT additional file.pdf` | MINT supplementary material |
+| `references/model_paper/Le-cao-2008-A-sparse-pls-for-variable-selection.pdf` | sPLS / variable selection foundation |
+| `references/model_paper/PLSDA.pdf` | PLS-DA methodology reference |
+| `references/model_paper/Rohart-2017-Mixomics-an-r-package-for-omics-fea.pdf` | mixOmics R package paper |
 
 ---
 
@@ -92,11 +118,10 @@ All files below are relative to `ClaudeHelp/Gut_Microbiome_Project-Edward-s-Pape
 | File | Role | Status |
 |---|---|---|
 | `Function_Helpers.R` | All reusable helper functions. Always `source()` this at the top of every Rmd. | Active |
-| `Test_Framework(BioInterp).Rmd` | Training pipeline sandbox: data loading → preprocessing → filtering → MINT modelling. No testing set. | Active |
-| `Test_Framework(Reproducibility).Rmd` | External validation sandbox: extends BioInterp with HGMA test set loading, `align_columns()`, retrain on common taxa, testing confusion matrix. | In progress (Edward) |
-| `full_framework.Rmd` | THE formal pipeline file. All finalised code goes here. | Not yet written |
+| `Test_Framework.Rmd` | **THE active combined sandbox** — full pipeline end-to-end. Sections: Data Loading → Data Processing → Model Development (IF + FS) → Strategy Selection → Biological Interpretation (stub) → Generalisation (HGMA preprocessing, `align_columns()`, external validation). Replaces the two former sandbox files. | Active |
+| `Test_Framework_old.Rmd` | Original pre-split sandbox (kept as backup/reference). Do not edit. | Reference only |
+| `full_framework.Rmd` | THE formal pipeline file. All finalised code goes here once sandbox is confirmed. | Skeleton only |
 | `HGMA_Processing.Rmd` | Builds HGMA test sets; standalone notebook for HGMA ingestion. | Reference |
-| `Test_Framework.Rmd` | Original combined sandbox (pre-split into BioInterp/Reproducibility). | Reference only |
 | `Batch_effect_management.Rmd` | Demo/reference only. Not part of active pipeline. | Reference only |
 | `Joyce/` | Joyce's intermediate working files. Not original, not final. Reference only. | Reference only |
 | `references/pipeline_reference.md` | **This file** — pipeline documentation. Mirrored at `ClaudeHelp/references/pipeline_reference.md`. Always update both copies together. | Active |
@@ -105,7 +130,7 @@ All files below are relative to `ClaudeHelp/Gut_Microbiome_Project-Edward-s-Pape
 
 ## 4. Variable Glossary
 
-All variables listed here appear in `Test_Framework(BioInterp).Rmd`.
+All variables listed here appear in `Test_Framework.Rmd` (the combined active sandbox).
 
 ### Data Loading section
 
@@ -135,7 +160,7 @@ The modelling section runs **both** data integration strategies in parallel, eac
 |---|---|---|
 | `result_individual` | `named nested list` | Output from `individual_filtering()`. Same structure as `res` (`$abund` + `$meta` per study), containing only studies that passed the per-study BER filter. |
 | `result_df_individual` | `data.frame (list result of bind_rows)` | All individually-filtered studies merged into one data frame. Sub-elements: `$abund` (combined CLR abundance) and `$meta` (combined metadata including `$study` column). |
-| `p_selected_individual` | `data.frame` | Alias for `result_df_individual$abund`. The individually-filtered CLR training abundance matrix. Used in `align_columns()` in the Reproducibility notebook. |
+| `p_selected_individual` | `data.frame` | Alias for `result_df_individual$abund`. The individually-filtered CLR training abundance matrix. Used in `align_columns()` in the Generalisation section. |
 | `mint_results_individual` | `named list` | Output from `run_mint(..., label="individual")`. Contains `$model`, `$optimal.keepX`, `$performance`, `$selected.features.comp1`, `$selected.features.comp2`, `$features.all`. |
 | `predict_individual` | `list` | `predict()` output on the individual-strategy training set. Access via `$class$centroids.dist[, comp]`. |
 | `conf_mat_individual_c1` | `matrix` | Confusion matrix (truth × predicted) for individual-strategy training predictions at component 1. |
@@ -147,11 +172,28 @@ The modelling section runs **both** data integration strategies in parallel, eac
 |---|---|---|
 | `result_forward` | `named nested list` | Output from `forward_selection()`. Same structure as `res`, containing only the greedy-optimal study combination. |
 | `result_df_forward` | `data.frame (list result of bind_rows)` | All forward-selected studies merged into one data frame. Sub-elements: `$abund` and `$meta` (including `$study` column). |
-| `p_selected_forward` | `data.frame` | Alias for `result_df_forward$abund`. The forward-selected CLR training abundance matrix. Used in `align_columns()` in the Reproducibility notebook. |
+| `p_selected_forward` | `data.frame` | Alias for `result_df_forward$abund`. The forward-selected CLR training abundance matrix. Used in `align_columns()` in the Generalisation section. |
 | `mint_results_forward` | `named list` | Output from `run_mint(..., label="forward")`. Same structure as `mint_results_individual`. |
 | `predict_forward` | `list` | `predict()` output on the forward-strategy training set. Access via `$class$centroids.dist[, comp]`. |
 | `conf_mat_forward_c1` | `matrix` | Confusion matrix (truth × predicted) for forward-strategy training predictions at component 1. |
 | `conf_mat_forward_c2` | `matrix` | Confusion matrix (truth × predicted) for forward-strategy training predictions at component 2. |
+
+#### Generalisation section variables (HGMA test sets)
+
+| Variable | Type | Description |
+|---|---|---|
+| `test1` | `named list` | PRJEB1786 (Swedish) test set loaded from `readRDS("PRJEB1786.rds")`. After preprocessing: `$abund` = CLR-transformed abundance (samples × taxa), `$meta` = metadata with `$disease`. |
+| `test2` | `named list` | PRJNA422434 (Chinese) test set loaded from `readRDS("PRJNA422434.rds")`. Note: `$meta$disease` labels are recoded from `"NGT"` → `"Healthy"` before preprocessing. |
+| `offset1` | `numeric` | Minimum positive value in `test1$abund` — used as CLR offset for PRJEB1786 (HGMA uses relative abundances, not counts, so offset=1 is inappropriate). |
+| `offset2` | `numeric` | Minimum positive value in `test2$abund` — CLR offset for PRJNA422434. |
+| `processed1` / `processed2` | `list` | Output from `preprocess_single()` on each test set. `$data` = CLR-transformed abundance; `$meta` = aligned metadata. Written back to `test1$abund`/`test2$abund` after call. |
+| `combined_obj1` | `list` | Output from `align_columns(selected_set$abund, test1$abund)`. Sub-elements: `$training` (CMD training abundance restricted to common taxa), `$testing` (PRJEB1786 abundance restricted to common taxa), `$change_log`, `$messages`. |
+| `combined_obj2` | `list` | Same structure as `combined_obj1` but for PRJNA422434 (test2). |
+| `mint_results_test1` | `named list` | Output from `run_mint(..., label="prjeb1786", model_mode="testing")` trained on `combined_obj1$training`. No xlsx saved. Used only to obtain `$model` for `predict()`. |
+| `mint_results_test2` | `named list` | Same structure as `mint_results_test1` but trained on `combined_obj2$training` for PRJNA422434. |
+| `predict_test1` / `predict_test2` | `list` | `predict()` output on the respective HGMA test set. Access via `$class$centroids.dist[, comp]`. |
+| `cm_test1_c1` / `cm_test1_c2` | `matrix` | PRJEB1786 confusion matrices (truth × predicted) at comp 1 and comp 2 respectively. |
+| `cm_test2_c1` / `cm_test2_c2` | `matrix` | PRJNA422434 confusion matrices (truth × predicted) at comp 1 and comp 2 respectively. |
 
 #### Shared temporary variables (reused by both strategies)
 
@@ -363,21 +405,6 @@ Computes BER for a candidate combination of studies using MINT sPLS-DA. Used ite
 
 ---
 
-### `draw_TestSet(threshold_for_LowCountsRm, disease_lst, dataset_study)`
-
-Loads and preprocesses a single HGMA external test study. Requires three raw files in the working directory: `sample_metadata.xlsx`, `vect_atlas.csv/vect_atlas.csv`, `corresponding_taxa.csv`.
-
-Handles HGMA-specific complexities: numeric taxon ID mapping, multi-subtype aggregation, `/` alias resolution, second-smallest-value CLR offset.
-
-| Parameter | Type | Description |
-|---|---|---|
-| `disease_lst` | `character vector` | HGMA disease labels to retain (e.g. `c("T2D","Healthy","NGT","healthy")`) |
-| `dataset_study` | `character` | BioProject ID (e.g. `"PRJEB1786"` or `"PRJNA422434"`) |
-
-**Returns**: `list($abund, $meta)` — CLR-transformed test set + metadata with `$disease` and `$study` columns.
-
----
-
 ### `align_columns(p_test, p_selected)`
 
 Reconciles taxa column names between CMD training data and HGMA testing data so both matrices can be directly compared.
@@ -399,7 +426,7 @@ Reconciles taxa column names between CMD training data and HGMA testing data so 
 
 ---
 
-### `run_mint(X, Y, ncomp, dist, nrepeat_perf, fold_perf, label)`
+### `run_mint(X, Y, ncomp, dist, nrepeat_perf, fold_perf, label, model_mode)`
 
 **Layers 4 & 5**. The main MINT sPLS-DA modelling function. Performs sequential hyperparameter tuning, fits the final model, and evaluates it.
 
@@ -415,7 +442,8 @@ Reconciles taxa column names between CMD training data and HGMA testing data so 
 | `dist` | `character` | Classification rule: `"centroids.dist"`, `"mahalanobis.dist"`, or `"max.dist"` |
 | `nrepeat_perf` | `integer` | Repeats for final `perf()` evaluation (default `20`) |
 | `fold_perf` | `integer` | Folds for final `perf()` evaluation (default `5`) |
-| `label` | `character` | Strategy label used to prefix output filenames (default `"mint"`). Use `"individual"` or `"forward"` to distinguish strategies. |
+| `label` | `character` | Strategy label used to prefix output filenames (default `"mint"`). Use `"individual"` or `"forward"` for training models; `"prjeb1786"` / `"prjna422434"` for test-set refits. |
+| `model_mode` | `character` | `"training"` (default) saves the `.xlsx` output; `"testing"` skips the xlsx save. Use `"testing"` when refitting on the common-taxa intersection for external validation, where only the fitted model object is needed. |
 
 **Returns**: named list:
 
@@ -431,7 +459,8 @@ Reconciles taxa column names between CMD training data and HGMA testing data so 
 **Side effects** (in addition to the return value):
 - Prints a formatted taxa summary to console: count + ranked list of names for each component.
 - Creates `output_files/` directory if it does not exist.
-- Saves `output_files/{label}_selected_taxa.xlsx` — 4 sheets: `Comp1_Taxa_Loadings`, `Comp2_Taxa_Loadings`, `Comp1_Error_Rate_per_Class`, `Comp2_Error_Rate_per_Class`. Requires `openxlsx` (listed in `req_pkgs`).
+- **Only when `model_mode == "training"`**: saves `output_files/{label}_selected_taxa.xlsx` — 4 sheets: `Comp1_Taxa_Loadings`, `Comp2_Taxa_Loadings`, `Comp1_Error_Rate_per_Class`, `Comp2_Error_Rate_per_Class`. Requires `openxlsx` (listed in `req_pkgs`).
+- When `model_mode == "testing"`, the xlsx save is skipped. External validation performance is instead reported via `predict()` + `get.confusion_matrix()` in the calling notebook.
 
 ---
 
@@ -508,9 +537,11 @@ This is a known quirk of the mixOmics API — `study` is not passed as a functio
 | # | Issue | Status |
 |---|---|---|
 | 1 | `err_thres` value: sandbox uses `0.5`, `individual_filtering` default is `0.55`, thesis specifies `0.7`. Needs reconciling before writing to `full_framework.Rmd`. | **OPEN** |
-| 2 | `Test_Framework(Reproducibility).Rmd` not yet completed. External validation (HGMA loading, `align_columns`, retrain on common taxa, testing confusion matrix) to be added by Edward. | **IN PROGRESS** |
-| 3 | `full_framework.Rmd` not yet started. All finalised code must be copied here once BioInterp and Reproducibility sandboxes are confirmed working. | **PENDING** |
-| 4 | HMP2019 study (6th training cohort from thesis) not yet added to `study_names` in BioInterp. | **PENDING** |
+| 2 | ~~`Test_Framework(Reproducibility).Rmd` not yet completed~~ — **RESOLVED by merge**: `Test_Framework(BioInterp).Rmd` and `Test_Framework(Reproducibility).Rmd` have been merged into a single `Test_Framework.Rmd`. The Generalisation section (HGMA preprocessing via `preprocess_single()`, offset computation, NGT recoding) is in progress within the merged file. | **IN PROGRESS** |
+| 3 | `full_framework.Rmd` not yet started. All finalised code must be copied here once `Test_Framework.Rmd` is confirmed working end-to-end. | **PENDING** |
+| 4 | ~~HMP2019 study not yet decided~~ — **RESOLVED**: HMP_2019_t2d is confirmed DISCARDED (per Research_Structure.jpg). Training set is 5 studies. | **CLOSED** |
+| 5 | `QinJ_2012` in `full_framework.Rmd` studies vector — this study is not in the 5-study training set and must be removed before finalising `full_framework.Rmd`. | **OPEN** |
+| 6 | `draw_TestSet()` — **REMOVED** from `Function_Helpers.R`. HGMA test data is now loaded directly from `PRJEB1786.rds` / `PRJNA422434.rds`. | **CLOSED** |
 
 ---
 

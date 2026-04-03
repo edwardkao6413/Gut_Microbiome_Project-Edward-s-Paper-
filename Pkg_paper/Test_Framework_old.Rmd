@@ -12,7 +12,7 @@ source("Function_Helpers.R")
 # Packages installation
 ```{r}
 req_pkgs = c('dplyr', 'mixOmics', 'curatedMetagenomicData', 'SummarizedExperiment', 
-             'stringr', 'testthat', 'tibble', 'stringr', 'purrr', 'openxlsx')
+             'stringr', 'testthat', 'tibble', 'stringr', 'purrr')
 
 install_if_missing(req_pkgs) 
 ```
@@ -42,80 +42,6 @@ meta_lst <- lapply(study_names, function(study) {
 
 ```
 
-```{r}
-# [ORIGINAL] align_columns() was defined inline here during development.
-# [UPDATED] Promoted to Function_Helpers.R — available via source("Function_Helpers.R") above.
-
-# feature alignment for taxa names
-# align_columns <- function(p_test, p_selected) {
-#
-#   # Remove 'species:' prefix from column names
-#   colnames(p_selected) <- sub("^species:\\s*", "", colnames(p_selected), ignore.case = TRUE)
-#   colnames(p_test) <- sub("^species:\\s*", "", colnames(p_test), ignore.case = TRUE)
-#
-#   change_log <- list()
-#   message_log <- character()  # Collect messages for single matches
-#
-#   for (i in seq_along(colnames(p_test))) {
-#
-#     col_test <- colnames(p_test)[i]
-#
-#     # Only process test columns with '/'
-#     if (grepl("/", col_test, fixed = TRUE)) {
-#
-#       taxa_test <- trimws(unlist(strsplit(col_test, "/", fixed = TRUE)))
-#       matched_train_cols <- c()
-#
-#       # Find matching train columns
-#       for (col_train in colnames(p_selected)) {
-#         taxa_train <- trimws(unlist(strsplit(col_train, "/", fixed = TRUE)))
-#         if (all(taxa_train %in% taxa_test)) {
-#           matched_train_cols <- c(matched_train_cols, col_train)
-#         }
-#       }
-#
-#       # Handle matches
-#       if (length(matched_train_cols) == 1) {
-#         old_name <- col_test
-#         colnames(p_test)[i] <- matched_train_cols[1]
-#         change_log[[old_name]] <- paste0("Single match: renamed test column to '", matched_train_cols[1], "'")
-#         message_log <- c(
-#           message_log,
-#           paste0("Single match found: test column '", old_name, "' renamed to '", matched_train_cols[1], "'")
-#         )
-#
-#       } else if (length(matched_train_cols) > 1) {
-#         new_train_col <- paste(matched_train_cols, collapse = "/")
-#
-#         # Create combined column in p_selected if needed
-#         if (!(new_train_col %in% colnames(p_selected))) {
-#           p_selected[[new_train_col]] <- rowSums(p_selected[, matched_train_cols, drop = FALSE])
-#           change_log[[paste0("p_selected: ", new_train_col)]] <- paste0(
-#             "Created new combined column from: ", paste(matched_train_cols, collapse = ", ")
-#           )
-#         }
-#
-#         old_name <- col_test
-#         colnames(p_test)[i] <- new_train_col
-#         change_log[[old_name]] <- paste0(
-#           "Multiple matches: renamed test column to '", new_train_col, "'"
-#         )
-#       }
-#       # No matches → leave unchanged
-#     }
-#   }
-#
-#   # Align training and testing datasets
-#   common_cols <- intersect(colnames(p_selected), colnames(p_test))
-#   training <- p_selected[, common_cols, drop = FALSE]
-#   testing <- p_test[, common_cols, drop = FALSE]
-#
-#   # Combine message log into a single variable
-#   all_messages <- paste(message_log, collapse = "\n")
-#
-#   return(list(training = training, testing = testing, change_log = change_log, messages = all_messages))
-# }
-```
 
 ```{r}
 # change the study name so users can read it easily.
@@ -140,15 +66,19 @@ res<- run_preprocessing(abundance_list = abundance_lst, meta_list = meta_lst, di
 ## Data Integration
 ### Individual filtering
 ```{r}
-result_individual <- individual_filtering(res, dist="centroids.dist", ncomp=2, err_thres = 0.5)
-print("Individual Filtering — selected studies:")
-individual_studies = names(result_individual)  # prints the names of studies that passed the filter
-individual_studies
+# CMD_filtered = readRDS("res")
+result <- individual_filtering(res, dist="centroids.dist", ncomp=2, err_thres = 0.5)
+names(result)
 ```
 
+## getting combined rawdata based on taxa from CMD filtering and studies from forward selection 
 ```{r}
+
+# extract study names
+studies <- names(result)
+
 # subset raw abundance data per study
-individual_raw_lst <- lapply(individual_studies, function(study, result) {
+subset_raw_lst <- lapply(studies, function(study) {
 
   # processed abundance (from previous function)
   abund_proc <- result[[study]]$abund
@@ -172,55 +102,12 @@ individual_raw_lst <- lapply(individual_studies, function(study, result) {
     cols_keep,
     drop = FALSE
   ]
-}, result = result_individual)
+})
 
 # bind all studies by rows
-p_select_individual <- bind_rows(individual_raw_lst)  
+p_selected <- bind_rows(subset_raw_lst)
 ```
 
-
-## Forward selection
-```{r}
-result_forward = forward_selection(res, dist="centroids.dist", ncomp=2)
-print("Forward Selection — selected studies:")
-forward_studies = names(result_forward)  # prints which studies were selected in the final combination
-forward_studies
-```
-
-```{r}
-## getting combined rawdata based on taxa from CMD filtering and studies from forward selection
-# subset raw abundance data per study
-forward_raw_lst <- lapply(forward_studies, function(study, result) {
-
-  # processed abundance (from previous function)
-  abund_proc <- result[[study]]$abund
-
-  # raw abundance data
-  abund_raw <- abundance_lst[[study]]
-
-  # rows (samples) and columns (taxa) to keep
-  rows_keep <- rownames(abund_proc)
-  cols_keep <- colnames(abund_proc)
-
-  # strict checks: all must exist
-  stopifnot(
-    all(rows_keep %in% rownames(abund_raw)),
-    all(cols_keep %in% colnames(abund_raw))
-  )
-
-  # subset raw data by rows AND columns
-  abund_raw[
-    rows_keep,
-    cols_keep,
-    drop = FALSE
-  ]
-}, result = result_forward)
-
-p_select_forward <- bind_rows(forward_raw_lst)  
-```
-
-
-# testing
 ## testing implementation of taxa renmaing
 ```{r}
 # [ORIGINAL] Loaded p_test from dedicated RDS file saved by HGMA_Processing.Rmd
@@ -228,7 +115,7 @@ p_select_forward <- bind_rows(forward_raw_lst)
 
 # [UPDATED] Load HGMA abundance directly from PRJEB1786.rds (same taxa column names; no p_test RDS needed)
 p_test <- readRDS("PRJEB1786.rds")$abund
-align_columns(p_test, p_select_forward)
+align_columns(p_test, p_selected)
 ```
 
 ## raw code testing

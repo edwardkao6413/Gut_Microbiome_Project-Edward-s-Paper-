@@ -22,10 +22,9 @@
 # 12. eliminate_single_taxa    – helper: drop taxa present in only one study
 # 13. calculate_multipleDB_BER – helper: BER for a multi-study combination
 # 14. forward_selection        – Layer 3: greedy study selection by BER
-# 15. draw_TestSet             – load and preprocess HGMA external test data
-# 16. align_columns            – align training (CMD) vs testing (HGMA) column names
-# 17. run_mint                 – Layer 4/5: MINT sPLS-DA tuning + fitting + evaluation
-# 18. plot_mint_results        – visualise MINT score plot and feature loadings
+# 15. align_columns            – align training (CMD) vs testing (HGMA) column names
+# 16. run_mint                 – Layer 4/5: MINT sPLS-DA tuning + fitting + evaluation
+# 17. plot_mint_results        – visualise MINT score plot and feature loadings
 
 ### paste functions below here
 
@@ -845,194 +844,7 @@ forward_selection = function(data, ncomp=2, study_col="study", validation='Mfold
 
 
 ## ============================================================
-## 15. HGMA TEST SET BUILDER
-## ============================================================
-
-# draw_TestSet(threshold_for_LowCountsRm, disease_lst, dataset_study)
-# -------------------------------------------------------------------
-# Loads and preprocesses ONE study from the Human Gut Microbiome Atlas (HGMA)
-# to serve as an external test set. HGMA uses numeric taxon IDs that must be
-# mapped to species names via corresponding_taxa.csv, and ambiguous multi-alias
-# taxon names (containing "/") are resolved by aggregation or renaming.
-#
-# Required files (must be present in the working directory):
-#   sample_metadata.xlsx    – HGMA sample metadata; columns include BioProject, sample.ID, Disease
-#   vect_atlas.csv/vect_atlas.csv – HGMA abundance matrix; rows = taxa (indexed by numeric ID)
-#   corresponding_taxa.csv  – lookup table mapping HGMA numeric IDs to species names
-#
-# Parameters:
-#   threshold_for_LowCountsRm – low-count removal threshold (default 0.01; unused directly,
-#                                used implicitly via preprocess_single)
-#   disease_lst               – disease labels to retain in HGMA (e.g. c("T2D","Healthy","NGT","healthy"))
-#   dataset_study             – BioProject ID to select from HGMA (e.g. "PRJEB1786" or "PRJNA422434")
-#
-# Returns: list with
-#   $abund – CLR-transformed abundance data frame (rows = samples, cols = taxa)
-#   $meta  – metadata data frame with $disease and $study columns
-draw_TestSet = function(threshold_for_LowCountsRm=0.01, disease_lst=c("T2D", "Healthy", "NGT", "healthy"), dataset_study) {
-  # --- Load raw HGMA files ---
-  print("Reading HGMA rawdata...")
-  sample_md = read_excel("sample_metadata.xlsx")        # sample-level metadata
-  abund_data = read.csv("vect_atlas.csv\\vect_atlas.csv") # abundance matrix (rows = taxa IDs)
-  corr_taxa = read.csv("corresponding_taxa.csv")          # ID-to-name mapping table
-
-  ## --- Pre-process the taxa name lookup table ---
-  print("Processing metadata and rawdata...")
-  # Remove rows where the species name contains "unclassified" (ambiguous taxa)
-  corr_taxa <- corr_taxa %>%
-    filter(!str_detect(name, "unclassified"))
-
-  # Multi-taxa entries: rows where name ends in " 1", " 2", etc. (subtypes of same species)
-  multi_taxa <- corr_taxa %>%
-    filter(str_detect(name, "\\s\\d$"))
-
-  # Strip trailing digit + space from multi-taxa names to get the base species name
-  multi_taxa <- multi_taxa %>%
-    mutate(name = str_sub(name, 1, -3))
-
-  multi_taxa_lst <- unique(multi_taxa$name)  # unique base names with multiple subtypes
-
-  ## --- Filter metadata and abundance to the requested study + diseases ---
-  # Select samples from the target BioProject
-  metadata = sample_md[sample_md['BioProject'] == dataset_study, ]
-  # Keep only samples with the requested disease labels
-  metadata = metadata %>%
-    filter(Disease %in% disease_lst)
-  sp_id = metadata$sample.ID  # sample IDs to extract from abundance matrix
-  # Subset abundance matrix to matching samples + keep the row ID column ("X")
-  rawdata = abund_data[, c(sp_id, "X")]
-
-  # Map numeric taxon IDs ("X" column) to species names via corresponding_taxa.csv
-  rawdata <- merge(
-    rawdata,
-    corr_taxa,
-    by.x = "X",
-    by.y = "id",
-    all.x = TRUE  # all.x=TRUE: Keep all rows from x even if no matching key in y (left join)
-  )
-  rawdata <- rawdata[, !(names(rawdata) %in% c("X", "id"))]  # drop numeric ID columns
-  rawdata <- rawdata[!is.na(rawdata$name), ]  # drop rows with no name match
-
-  ## --- Transpose: make rows = samples, cols = taxa ---
-  taxa_lst = rawdata$name  # taxon names (will become column headers)
-  rawdata_v1 = data.frame(t(rawdata[, !(names(rawdata) %in% c("name"))]))
-  colnames(rawdata_v1) = taxa_lst  # assign taxon names as column headers
-  names(rawdata_v1)[names(rawdata_v1) == "index"] = "sample_id"
-  rawdata_v1$sample_id = rownames(rawdata_v1)  # sample IDs as a column
-
-  # Attach disease label from metadata
-  rawdata_v1 = merge(rawdata_v1,
-                     metadata[, c("sample.ID", "Disease")],
-                     by.x="sample_id",
-                     by.y="sample.ID",
-                     all.x=TRUE)
-  # Fix one known alias: two equivalent species names merged to the preferred name
-  names(rawdata_v1)[names(rawdata_v1) == "Blautia coccoides == Blautia producta"] = "Blautia producta"
-
-  ## --- Resolve multi-subtype taxa (aggregation logic) ---
-  # Helper: check whether any alias in a "/" list lacks a trailing digit
-  # (i.e. a "main" species entry exists, not just subtypes)
-  check_main_species <- function(lst) {
-    integers <- as.character(1:9)
-    for (sub in lst) {
-      last_char <- substr(sub, nchar(sub), nchar(sub))
-      if (!(last_char %in% integers)) {
-        return(TRUE)  # found a column without a trailing digit → main species present
-      }
-    }
-    return(FALSE)
-  }
-
-  # For each multi-subtype base species, consolidate the subtype columns
-  for (taxa in multi_taxa_lst) {
-    if ( !grepl("subtype", tolower(taxa), fixed = T) ) {
-      cols = colnames(rawdata_v1)
-      rawdata_v1$taxa = 0
-      # Find all columns that match this base species (includes subtypes)
-      alltaxa_columns <- cols[grepl(taxa, cols, fixed = T)]
-
-      if ( length(alltaxa_columns) == 1 ) {
-        # Only one column found → directly assign it as the canonical species column
-        rawdata_v1[[taxa]] <- rawdata_v1[[alltaxa_columns[1]]]
-      } else if ( check_main_species(alltaxa_columns) == T ) {
-        # A main-species column exists → remove the subtype columns, keep the main
-        alltaxa_columns <- setdiff(alltaxa_columns, taxa)
-        rawdata_v1 <- rawdata_v1[, !(names(rawdata_v1) %in% alltaxa_columns), drop = FALSE]
-
-      } else {
-        # All columns are subtypes → sum them into one combined column, drop subtypes
-        rawdata_v1[[taxa]] <- rowSums(rawdata_v1[, alltaxa_columns, drop = FALSE], na.rm = TRUE)
-        rawdata_v1 <- rawdata_v1[, !(names(rawdata_v1) %in% alltaxa_columns), drop = FALSE]
-      }
-    }
-  }
-
-  ## --- Rename ambiguous "/" alias columns to the canonical CMD-compatible name ---
-  # These mappings resolve HGMA taxa names with "/" (multiple possible identities)
-  # to the single name used in the CMD training set
-  rename_map <- c(
-    "Lachnospiraceae bacterium hRUG904 / Clostridiales bacterium RUG495 / [Clostridium] sp. CAG:127" = "[Clostridium] sp. CAG:127",
-    "Firmicutes bacterium CAG:65 / [Clostridium] sp. 2789STDY5608883" = "Firmicutes bacterium CAG:65",
-    "Lachnospiraceae bacterium CIM:MAG 844 / Firmicutes bacterium CAG:95" = "Firmicutes bacterium CAG:95",
-    "[Ruminococcus] sp. CAG:17 / Blautia sp. 2789STDY5608880" = "[Ruminococcus] sp. CAG:17",
-    "Roseburia sp. CAG:100 / Lachnospiraceae bacterium CIM:MAG 54" = "Roseburia sp. CAG:100",
-    "Clostridiales bacterium UBA7273 / Firmicutes bacterium CAG:240" = "Firmicutes bacterium CAG:240",
-    "Firmicutes bacterium CAG:24 / [Clostridium] sp. 2789STDY5834869 & 2789STDY5834922" = "Firmicutes bacterium CAG:24",
-    "Coprococcus sp. 2789STDY5608819 / [Clostridium] sp. CAG:264" = "[Clostridium] sp. CAG:264",
-    "[Ruminococcus] sp. 2789STDY5608794 & sp. 2789STDY5834890 / Firmicutes bacterium CAG:56" = "Firmicutes bacterium CAG:56",
-    "Lachnospiraceae bacterium TF01-11 / [Clostridium] sp. CAG:122" = "[Clostridium] sp. CAG:122",
-    "[Acinetobacter] sp. N54.MGS-139 / Proteobacteria bacterium CAG:139" = "Proteobacteria bacterium CAG:139",
-    "[Ruminococcus] sp. CAG:60 / Blautia sp. 2789STDY5608836" = "[Ruminococcus] sp. CAG:60",
-    "[Eubacterium] sp. CAG:251 / [Clostridium] sp. A254.MGS-251" = "[Eubacterium] sp. CAG:251",
-    "[Clostridium] sp. CAG:217 / Clostridiales bacterium CIM:MAG 317_1" = "[Clostridium] sp. CAG:217",
-    "Lachnoclostridium sp. SNUG30386 / [Clostridium] sp. CAG:43" = "[Clostridium] sp. CAG:43",
-    "[Ruminococcaceae] bacterium D16 / Clostridiales bacterium Choco116" = "[Ruminococcaceae] bacterium D16",
-    "Firmicutes bacterium CAG:41 / [Clostridium] sp. 2789STDY5834935 & sp. 2789STDY5608853" = "Firmicutes bacterium CAG:41",
-    "[Clostridiaceae] bacterium CIM:MAG 755 / [Clostridium] sp. CAG:230" = "[Clostridium] sp. CAG:230",
-    "Firmicutes bacterium CAG:212 / [Clostridium] sp. 2789STDY5834871" = "Firmicutes bacterium CAG:212",
-    "Bacteroidales bacterium H2 / [Prevotella] sp. CAG:251" = "[Prevotella] sp. CAG:251",
-    "Ruminococcaceae bacterium UBA1821 / [Clostridium] sp. CAG:678" = "[Clostridium] sp. CAG:678",
-    "Oscillibacter sp. ER4 / Firmicutes bacterium CAG:129_59_24" = "Oscillibacter sp. ER4",
-    "Clostridiales bacterium RUG303 & RUG439 & RUG453 / Firmicutes bacterium CAG:129" = "Firmicutes bacterium CAG:129",
-    "Candidatus Methanomethylophilus alvus / Methanoculleus sp. CAG:1088" = "Methanoculleus sp. CAG:1088",
-    "[Clostridiaceae] bacterium CIM:MAG 987 / [Clostridium] sp. CAG:533" = "[Clostridium] sp. CAG:533",
-    "[Firmicutes] bacterium CIM:MAG 721 / [Bacillus] sp. CAG:988" = "[Bacillus] sp. CAG:988",
-    "Disease" = "disease"
-  )
-
-  # Apply rename_map to matching column names
-  cols <- colnames(rawdata_v1)
-  hits <- cols %in% names(rename_map)
-  cols[hits] <- unname(rename_map[cols[hits]])
-  colnames(rawdata_v1) <- cols
-
-  ## --- Final packaging: separate abundance from metadata, then CLR-transform ---
-  print("Organizing the metadata and the rawdata into proper output form")
-  # Split into abundance (all taxa cols) and metadata (sample_id + disease) sub-lists
-  hgma_lst = list(abund=subset(rawdata_v1, select=-c(sample_id, disease)), meta=subset(rawdata_v1, select=c(sample_id, disease)) )
-
-  # Compute the second-smallest non-zero value as the CLR offset
-  # (offset = second-smallest gives a conservative near-zero value specific to this dataset)
-  x <- unlist(hgma_lst$abund)
-  x <- x[x > 0]
-  second_smallest <- sort(unique(x), na.last = NA)[2]
-
-  # Run full preprocessing (filter_meta → split_count_filtering → CLR)
-  processed_lst = preprocess_single(meta=hgma_lst$meta, abund=hgma_lst$abund, diseases=disease_lst,
-                                    keep_cols=c("sample_id"), offset_value=second_smallest, percent=0.01, CLR=T )
-  # Rename $data → $abund for consistency with the rest of the pipeline
-  names(processed_lst)[names(processed_lst) == "data"] = "abund"
-  # Add study label to metadata (used by align_columns and MINT)
-  processed_lst$meta$study = dataset_study
-
-  return(processed_lst)
-}
-
-
-
-
-## ============================================================
-## 16. COLUMN ALIGNMENT: TRAINING vs TESTING
+## 15. COLUMN ALIGNMENT: TRAINING vs TESTING
 ## ============================================================
 
 ## Feature alignment: CMD (training) vs HGMA (testing) column names
@@ -1143,7 +955,7 @@ align_columns <- function(p_test, p_selected) {
 
 
 ## ============================================================
-## 17. LAYER 4/5 — MINT sPLS-DA MODELLING
+## 16. LAYER 4/5 — MINT sPLS-DA MODELLING
 ## ============================================================
 
 ## MINT sPLS-DA modelling: sequential hyperparameter tuning + model fitting + evaluation
@@ -1181,7 +993,8 @@ align_columns <- function(p_test, p_selected) {
 #   $selected.features.comp1 – character vector of taxa selected on component 1
 #   $selected.features.comp2 – character vector of taxa selected on component 2
 #   $features.all            – character vector of all unique selected taxa (lowercased)
-run_mint <- function(X, Y, ncomp = 2, dist = "centroids.dist", nrepeat_perf=20, fold_perf=5, label = "mint") {
+run_mint <- function(X, Y, ncomp = 2, dist = "centroids.dist", nrepeat_perf=20, fold_perf=5, label = "mint",
+                     model_mode = "training") {
 
   # STEP 1: Tune component 1
   # test.keepX tries keeping 10 to all taxa; leave-one-study-out CV is automatic for MINT
@@ -1256,54 +1069,59 @@ run_mint <- function(X, Y, ncomp = 2, dist = "centroids.dist", nrepeat_perf=20, 
 
   # STEP 6: Save selected taxa + loading values and per-class error rates to Excel
   # -------------------------------------------------------------------------------
-  # selectVar()$value returns a data.frame: row names = taxa names, col 1 = loading value
-  # We extract col 1 explicitly to be robust to version differences in column naming.
-  loadings.comp1 <- data.frame(
-    taxa    = rownames(selectVar(model, comp = 1)$value),
-    loading = selectVar(model, comp = 1)$value[, 1],
-    row.names = NULL
-  )
-  loadings.comp2 <- data.frame(
-    taxa    = rownames(selectVar(model, comp = 2)$value),
-    loading = selectVar(model, comp = 2)$value[, 1],
-    row.names = NULL
-  )
+  # Only executed when model_mode == "training".
+  # When model_mode == "testing" (e.g. refitting on intersection taxa for external validation),
+  # the xlsx save is skipped — external validation results are reported via confusion matrices.
+  if (model_mode == "training") {
+    # selectVar()$value returns a data.frame: row names = taxa names, col 1 = loading value
+    # We extract col 1 explicitly to be robust to version differences in column naming.
+    loadings.comp1 <- data.frame(
+      taxa    = rownames(selectVar(model, comp = 1)$value),
+      loading = selectVar(model, comp = 1)$value[, 1],
+      row.names = NULL
+    )
+    loadings.comp2 <- data.frame(
+      taxa    = rownames(selectVar(model, comp = 2)$value),
+      loading = selectVar(model, comp = 2)$value[, 1],
+      row.names = NULL
+    )
 
-  # perf$global.error$error.rate.class[[dist]] is a matrix:
-  # rows = disease classes (e.g. Healthy, T2D), cols = components (1, 2, ...)
-  err_class_mat <- perf$global.error$error.rate.class[[dist]]
-  err_comp1 <- data.frame(
-    class      = rownames(err_class_mat),
-    error_rate = err_class_mat[, 1],  # column 1 = component 1 error rates
-    row.names  = NULL
-  )
-  err_comp2 <- data.frame(
-    class      = rownames(err_class_mat),
-    error_rate = err_class_mat[, 2],  # column 2 = component 2 error rates
-    row.names  = NULL
-  )
+    # perf$global.error$error.rate.class[[dist]] is a matrix:
+    # rows = disease classes (e.g. Healthy, T2D), cols = components (1, 2, ...)
+    err_class_mat <- perf$global.error$error.rate.class[[dist]]
+    err_comp1 <- data.frame(
+      class      = rownames(err_class_mat),
+      error_rate = err_class_mat[, 1],  # column 1 = component 1 error rates
+      row.names  = NULL
+    )
+    err_comp2 <- data.frame(
+      class      = rownames(err_class_mat),
+      error_rate = err_class_mat[, 2],  # column 2 = component 2 error rates
+      row.names  = NULL
+    )
 
-  # Create output directory if it doesn't exist
-  if (!dir.exists("output_files")) dir.create("output_files")
+    # Create output directory if it doesn't exist
+    if (!dir.exists("output_files")) dir.create("output_files")
 
-  # Install openxlsx if needed, then write 4-sheet Excel workbook
-  if (!requireNamespace("openxlsx", quietly = TRUE)) install.packages("openxlsx")
-  library(openxlsx)
+    # Install openxlsx if needed, then write 4-sheet Excel workbook
+    if (!requireNamespace("openxlsx", quietly = TRUE)) install.packages("openxlsx")
+    library(openxlsx)
 
-  wb <- createWorkbook()
-  addWorksheet(wb, "Comp1_Taxa_Loadings")          # Sheet 1: comp 1 taxa + loading values
-  addWorksheet(wb, "Comp2_Taxa_Loadings")          # Sheet 2: comp 2 taxa + loading values
-  addWorksheet(wb, "Comp1_Error_Rate_per_Class")   # Sheet 3: comp 1 per-class error rate
-  addWorksheet(wb, "Comp2_Error_Rate_per_Class")   # Sheet 4: comp 2 per-class error rate
-  writeData(wb, "Comp1_Taxa_Loadings",        loadings.comp1)
-  writeData(wb, "Comp2_Taxa_Loadings",        loadings.comp2)
-  writeData(wb, "Comp1_Error_Rate_per_Class", err_comp1)
-  writeData(wb, "Comp2_Error_Rate_per_Class", err_comp2)
-  # Prefix the filename with `label` so outputs from different integration strategies
-  # (e.g. "forward", "individual") are saved as separate files and never overwrite each other.
-  xlsx_path <- paste0("output_files/", label, "_selected_taxa.xlsx")
-  saveWorkbook(wb, xlsx_path, overwrite = TRUE)
-  cat("Excel saved →", xlsx_path, "\n\n")
+    wb <- createWorkbook()
+    addWorksheet(wb, "Comp1_Taxa_Loadings")          # Sheet 1: comp 1 taxa + loading values
+    addWorksheet(wb, "Comp2_Taxa_Loadings")          # Sheet 2: comp 2 taxa + loading values
+    addWorksheet(wb, "Comp1_Error_Rate_per_Class")   # Sheet 3: comp 1 per-class error rate
+    addWorksheet(wb, "Comp2_Error_Rate_per_Class")   # Sheet 4: comp 2 per-class error rate
+    writeData(wb, "Comp1_Taxa_Loadings",        loadings.comp1)
+    writeData(wb, "Comp2_Taxa_Loadings",        loadings.comp2)
+    writeData(wb, "Comp1_Error_Rate_per_Class", err_comp1)
+    writeData(wb, "Comp2_Error_Rate_per_Class", err_comp2)
+    # Prefix the filename with `label` so outputs from different integration strategies
+    # (e.g. "forward", "individual") are saved as separate files and never overwrite each other.
+    xlsx_path <- paste0("output_files/", label, "_selected_taxa.xlsx")
+    saveWorkbook(wb, xlsx_path, overwrite = TRUE)
+    cat("Excel saved →", xlsx_path, "\n\n")
+  }
 
   results <- list(
     model                  = model,          # fitted MINT sPLS-DA object
@@ -1321,7 +1139,7 @@ run_mint <- function(X, Y, ncomp = 2, dist = "centroids.dist", nrepeat_perf=20, 
 
 
 ## ============================================================
-## 18. MINT RESULT VISUALISATION
+## 17. MINT RESULT VISUALISATION
 ## ============================================================
 
 ## MINT sPLS-DA visualisation: score plot + loadings for both components

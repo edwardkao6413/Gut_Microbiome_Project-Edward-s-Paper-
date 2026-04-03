@@ -4,334 +4,469 @@ output: html_document
 date: "2025-11-29"
 ---
 
+# PURPOSE
+# This notebook implements the TRAINING PIPELINE only (no external test set).
+# It covers: data loading → preprocessing → individual filtering → forward selection → MINT modelling.
+# Use Test_Framework(Reproducibility).Rmd to extend with the HGMA test set and external validation.
+
 ```{r}
-rm(list=ls()) 
+# Clear the workspace to avoid stale variables from previous runs
+rm(list=ls())
+# Load all helper functions (preprocessing, filtering, modelling, visualisation)
 source("Function_Helpers.R")
 ```
 
 # Packages installation
 ```{r}
-req_pkgs = c('dplyr', 'mixOmics', 'curatedMetagenomicData', 'SummarizedExperiment', 
-             'stringr', 'testthat', 'tibble', 'stringr', 'purrr')
+# req_pkgs: character vector of all packages required by this pipeline
+# - dplyr:                   data manipulation (filter, select, mutate, bind_rows)
+# - mixOmics:                PLS-DA, MINT sPLS-DA, CLR transformation, perf(), tune()
+# - curatedMetagenomicData:  access to curated gut microbiome study datasets (CMD v3.16.1)
+# - SummarizedExperiment:    data container used by curatedMetagenomicData (assay(), colData())
+# - stringr:                 string manipulation (str_detect, str_sub, regex)
+# - testthat:                unit testing utilities (used in validation checks)
+# - tibble:                  tibble data frames (used by some helper functions)
+# - purrr:                   functional programming (map, imap, map_lgl)
+req_pkgs = c('dplyr', 'mixOmics', 'curatedMetagenomicData', 'SummarizedExperiment',
+             'stringr', 'testthat', 'tibble', 'stringr', 'purrr',
+             'openxlsx')  # openxlsx: required by run_mint() to export selected taxa + error rates to Excel
 
-install_if_missing(req_pkgs) 
+install_if_missing(req_pkgs)
 ```
 
 ## Data Loading
 ```{r}
-study_names <- c("FengQ_2015.relative_abundance", "KarlssonFH_2013.relative_abundance", "LiJ_2014.relative_abundance", 
+# study_names: CMD query strings for the 5 training cohorts
+# Format: "<AuthorYear>.<data_type>"
+# The 5 studies span diverse populations (Chinese, Swedish, Indian, American):
+#   FengQ_2015       – colorectal cancer cohort (Chinese); contains T2D/Healthy
+#   KarlssonFH_2013  – Swedish T2D cohort; the canonical T2D microbiome study
+#   LiJ_2014         – large-scale Chinese metagenome reference cohort
+#   YuJ_2015         – colorectal cancer cohort (Chinese); also contains T2D/Healthy
+#   SankaranarayananK_2015 – Indian cohort
+study_names <- c("FengQ_2015.relative_abundance", "KarlssonFH_2013.relative_abundance", "LiJ_2014.relative_abundance",
                  "YuJ_2015.relative_abundance", "SankaranarayananK_2015.relative_abundance")
 
 # Load and process each study
+# abundance_lst: named list (length 5); each element is a data.frame:
+#   rows = samples (sample IDs as row names)
+#   cols = taxa (species names as column names, e.g. "Bacteroides uniformis")
+# counts=TRUE retrieves raw counts (not pre-normalised relative abundances)
+# rownames="short" assigns short sample IDs rather than full accession strings
+# t() transposes from taxa×samples to samples×taxa orientation
+# check.names=FALSE preserves special characters and spaces in taxa names
 abundance_lst <- lapply(study_names, function(study) {
   rawdata <- curatedMetagenomicData(study, dryrun = FALSE, counts = TRUE, rownames = "short")
-  raw_tse <- rawdata[[1]]
-  abund <- assay(raw_tse, "relative_abundance")
+  raw_tse <- rawdata[[1]]  # extract the SummarizedExperiment object
+  abund <- assay(raw_tse, "relative_abundance")  # taxa × samples matrix
+  
   # Joyce: added checknames =false to prevent issues with inconsistent colnames later
-  as.data.frame(t(abund), check.names = FALSE)
+  as.data.frame(t(abund), check.names = FALSE)  # transpose → samples × taxa
 })
 
 ## output data: keys are study name, each col is taxa name
-
+# meta_lst: named list (length 5); each element is a data.frame:
+#   rows = samples (sample IDs as row names)
+#   cols = all CMD metadata columns (includes 'disease', 'gender', 'body_site', etc.)
 # Extract metadata for each study
 meta_lst <- lapply(study_names, function(study) {
   rawdata <- curatedMetagenomicData(study, dryrun = FALSE, counts = TRUE, rownames = "short")
   raw_tse <- rawdata[[1]]
-  as.data.frame(colData(raw_tse), check.names = FALSE)
+  as.data.frame(colData(raw_tse), check.names = FALSE)  # sample metadata from SummarizedExperiment
 })
 
 ```
 
 
+
+
 ```{r}
-# change the study name so users can read it easily.
+# study_names_v2: shortened study names (strip ".relative_abundance" suffix)
+# e.g. "FengQ_2015.relative_abundance" → "FengQ_2015"
+# Used as list names for abundance_lst and meta_lst so they are human-readable
+# and match the format used as the study label in modelling.
 study_names_v2 = c()
 for (i in 1:length(strsplit(study_names, "\\.")) ) {
+  # strsplit splits on "."; take the first element (the study name before the dot)
   study_names_v2[i] = strsplit(study_names, "\\.")[[i]][1]
 }
 
-names(abundance_lst) <- study_names_v2  
+# Apply shortened names to both lists (enables name-based access downstream)
+names(abundance_lst) <- study_names_v2
 names(meta_lst) <- study_names_v2
 ```
 
 
 ## Data Processing
 ```{r}
+# keep_cols: additional metadata columns to retain alongside 'disease'
+#   "gender"    – sex of the participant (used in downstream characterisation)
+#   "body_site" – sampling location (all should be stool for gut microbiome studies)
 keep_cols <-c("gender", "body_site")
+
+# diseases: the two disease classes we are discriminating
+#   "Healthy" – Normal Glucose Tolerance (NGT) / control participants
+#   "T2D"     – Type 2 Diabetes participants
 diseases <- c("Healthy", "T2D")
+
+# run_preprocessing() is the main preprocessing entry point (Function_Helpers.R).
+# For 5 studies it routes to preprocess_multiple() → preprocess_single() per study → integrate_filter()
+#
+# Parameters used:
+#   percent = 0.01    → remove taxa contributing < 0.01% of total abundance (low-count removal)
+#   offset_value = 1  → add 1 to all counts before CLR (standard for count data to handle zeros)
+#   threshold = 1     → keep taxa present in at least 1 study (effectively: keep all)
+#
+# res: named nested list; keys = study short names (e.g. "FengQ_2015")
+#   res[[study_name]]$abund – CLR-transformed abundance data frame (samples × surviving taxa)
+#   res[[study_name]]$meta  – filtered metadata (disease, gender, body_site columns)
 res<- run_preprocessing(abundance_list = abundance_lst, meta_list = meta_lst, diseases = diseases, keep_cols = keep_cols, percent = 0.01, offset_value = 1, threshold = 1)
+
 ```
 
 # Model Development and Training
 ## Data Integration
 ### Individual filtering
 ```{r}
-# CMD_filtered = readRDS("res")
-result <- individual_filtering(res, dist="centroids.dist", ncomp=2, err_thres = 0.5)
-names(result)
+# individual_filtering() (Layer 2): removes studies where any disease class is too
+# hard to discriminate (per-class BER > err_thres at ncomp components).
+#
+# INPUT:  res – preprocessed study list from run_preprocessing()
+# OUTPUT: result_individual – filtered study list (same structure as res, failing studies removed)
+#
+# Parameters:
+#   dist      = "centroids.dist" – nearest-centroid classification rule for PLS-DA CV
+#   ncomp     = 2                – evaluate at 2 PLS-DA components
+#   err_thres = 0.5              – discard any study where a class BER > 50%
+#                                  (NOTE: thesis specifies 0.7; reconcile before full_framework.Rmd)
+#
+# CMD_filtered = readRDS("res")  # [ORIGINAL] was loaded from disk; now kept in memory
+result_individual <- individual_filtering(res, dist="centroids.dist", ncomp=2, err_thres = 0.5)
+print("Individual Filtering — selected studies:")
+names(result_individual)  # prints the names of studies that passed the filter
+
 ```
-
-## getting combined rawdata based on taxa from CMD filtering and studies from forward selection 
-```{r}
-
-# extract study names
-studies <- names(result)
-
-# subset raw abundance data per study
-subset_raw_lst <- lapply(studies, function(study) {
-
-  # processed abundance (from previous function)
-  abund_proc <- result[[study]]$abund
-
-  # raw abundance data
-  abund_raw <- abundance_lst[[study]]
-
-  # rows (samples) and columns (taxa) to keep
-  rows_keep <- rownames(abund_proc)
-  cols_keep <- colnames(abund_proc)
-
-  # strict checks: all must exist
-  stopifnot(
-    all(rows_keep %in% rownames(abund_raw)),
-    all(cols_keep %in% colnames(abund_raw))
-  )
-
-  # subset raw data by rows AND columns
-  abund_raw[
-    rows_keep,
-    cols_keep,
-    drop = FALSE
-  ]
-})
-
-# bind all studies by rows
-p_selected <- bind_rows(subset_raw_lst)
-```
-
-## testing implementation of taxa renmaing
-```{r}
-# [ORIGINAL] Loaded p_test from dedicated RDS file saved by HGMA_Processing.Rmd
-# p_test <- readRDS("p_test")
-
-# [UPDATED] Load HGMA abundance directly from PRJEB1786.rds (same taxa column names; no p_test RDS needed)
-p_test <- readRDS("PRJEB1786.rds")$abund
-align_columns(p_test, p_selected)
-```
-
-## raw code testing
-```{r}
-# [ORIGINAL] Loaded p_test from dedicated RDS file saved by HGMA_Processing.Rmd
-# p_test <- readRDS("p_test")
-
-# [UPDATED] Load HGMA abundance directly from PRJEB1786.rds (same taxa column names; no p_test RDS needed)
-p_test <- readRDS("PRJEB1786.rds")$abund
-colnames(p_selected) <- sub("^species:\\s*", "", colnames(p_selected), ignore.case = TRUE)
-# 1: Initialize message log
-change_log <- list()
-
-# 2: Loop over columns of p_test
-for (i in seq_along(colnames(p_test))) {
-  
-  col_test <- colnames(p_test)[i]
-  
-  # Only process columns that contain '/'
-  if (grepl("/", col_test, fixed = TRUE)) {
-    
-    # Step 2a: Split test column into taxa and trim whitespace
-    taxa_test <- trimws(unlist(strsplit(col_test, "/", fixed = TRUE)))
-    
-    # Step 2b: Find matching train columns (p_selected)
-    matched_train_cols <- c()
-    
-    for (col_train in colnames(p_selected)) {
-      taxa_train <- trimws(unlist(strsplit(col_train, "/", fixed = TRUE)))  # works if no '/'
-      
-      if (all(taxa_train %in% taxa_test)) {
-        matched_train_cols <- c(matched_train_cols, col_train)
-      }
-    }
-    
-    # Step 2c: Handle matches
-    if (length(matched_train_cols) == 1) {
-      # Single match → rename p_test column
-      old_name <- col_test
-      colnames(p_test)[i] <- matched_train_cols[1]
-      change_log[[old_name]] <- paste0("Single match: renamed test column to '", matched_train_cols[1], "'")
-      
-      # Print only for single matches
-      cat("\nSingle match found:\n")
-      cat("  Test column:", old_name, "\n")
-      cat("  Matched train column:", matched_train_cols[1], "\n")
-      cat("  Action: renamed test column to", matched_train_cols[1], "\n")
-      
-    } else if (length(matched_train_cols) > 1) {
-      # Multiple matches → create combined column in p_selected
-      new_train_col <- paste(matched_train_cols, collapse = "/")
-      
-      # Only create new column if it does not already exist
-      if (!(new_train_col %in% colnames(p_selected))) {
-        p_selected[[new_train_col]] <- rowSums(p_selected[, matched_train_cols, drop = FALSE])
-        change_log[[paste0("p_selected: ", new_train_col)]] <- paste0(
-          "Created new combined column from: ", paste(matched_train_cols, collapse = ", ")
-        )
-      }
-      
-      # Rename p_test column to match new_train_col
-      old_name <- col_test
-      colnames(p_test)[i] <- new_train_col
-      change_log[[old_name]] <- paste0(
-        "Multiple matches: renamed test column to '", new_train_col, "'"
-      )
-    }
-    
-    # If no matches, leave column unchanged (no print)
-  }
-}
-
-# 3: Outputs
-cat("\n---\nFinal column names in p_test:\n")
-print(colnames(p_test))
-
-cat("\nFinal column names in p_selected:\n")
-print(colnames(p_selected))
-
-cat("\nChange log:\n")
-print(change_log)
-```
-
-
-
-
-
-
-
-
-
-
-
-
 
 ### Forward selection
 ```{r}
-result = forward_selection(res, dist="centroids.dist", ncomp=2)
+# forward_selection() (Layer 3): greedy algorithm to find the optimal SUBSET of
+# studies to integrate. Studies are added one-at-a-time; a study is accepted only
+# if adding it reduces the multi-study MINT BER.
+#
+# INPUT:  res – preprocessed study list (NOTE: uses res, not the individually-filtered result;
+#               forward selection implicitly handles noisy studies via BER)
+# OUTPUT: result_forward – named list of the selected study objects (abund + meta)
+#
+# Parameters:
+#   dist  = "centroids.dist" – classification rule for MINT evaluation
+#   ncomp = 2                – number of MINT components
+result_forward = forward_selection(res, dist="centroids.dist", ncomp=2)
+print("Forward Selection — selected studies:")
+names(result_forward)  # prints which studies were selected in the final combination
+
 ```
 
 ## Modelling
+### Individual Filtering — MINT Model
 ```{r}
-## compose off integrative datasets for all selected studies
-for (name in names(result)) {
-  result[[name]]$meta$study = strsplit(name, '\\.')[[1]][1]
-  # lst[[name]]$meta$study = name
+## Assemble integrative dataset from individually-filtered studies
+
+# Add 'study' column to each study's metadata for provenance tracking after bind_rows
+for (name in names(result_individual)) {
+  result_individual[[name]]$meta$study = strsplit(name, '\\.')[[1]][1]
 }
-# binding together
-result_df = bind_rows(result)
-# [ORIGINAL] Saved p_selected to disk for schema-level feature alignment in HGMA_Processing.Rmd
-# saveRDS(result_df$abund, "p_selected")
 
-# [UPDATED] p_selected stays as in-memory variable; result_df$abund is used directly downstream
-p_selected_fs <- result_df$abund  # forward-selected CLR-transformed training abundance
+# result_df_individual: all individually-filtered studies stacked into one data frame
+# $abund – combined CLR abundance (rows = all samples, cols = taxa)
+# $meta  – combined metadata (rows = all samples, includes $study column)
+result_df_individual = bind_rows(result_individual)
 
-ab.mint.splsda = tune(method = "mint.splsda", X = result_df$abund, Y = as.factor(result_df$meta$disease), ncomp = 2, folds=5, nrepeat=10,
-                      study = as.factor(result_df$meta$study), test.keepX = seq(10, ncol(result_df$abund), 1), validation = 'Mfold', dist = "centroids.dist") 
-plot(ab.mint.splsda)
-optimal.keepX = ab.mint.splsda$choice.keepX
-optimal.keepX
-mint.splsda.model = mint.splsda(X=result_df$abund, Y=result_df$meta$disease, 
-                                study=result_df$meta$study, ncomp=2, keepX = optimal.keepX)
+# p_selected_individual: training abundance matrix for the individual-filtering strategy.
+# Used in align_columns() when aligning with the HGMA test set in Reproducibility notebook.
+p_selected_individual <- result_df_individual$abund
 
-perf(mint.splsda.model, validation="Mfolds", folds=5, nrepeat=10, dist="centroids.dist")$global.error$error.rate.class
+# Prepare run_mint() inputs for the individual-filtering strategy
+# study must exist in the calling environment — run_mint() reads it directly
+X     <- result_df_individual$abund
+Y     <- as.factor(result_df_individual$meta$disease)
+study <- as.factor(result_df_individual$meta$study)
 
-## Confusion matrix for training set
-predict.splsda.null <- predict(mint.splsda.model, newdata = result_df$abund, 
-                             dist = "centroids.dist", study.test = result_df$meta$study)
+# run_mint() with label="individual" → outputs saved as:
+#   output_files/individual_selected_taxa.xlsx
+#   (plots saved by plot_mint_results below)
+mint_results_individual <- run_mint(X = X, Y = Y, ncomp = 2, dist = "centroids.dist",
+                                    label = "individual")
 
-conf_mat_c1 = get.confusion_matrix(truth = result_df$meta$disease, predicted = predict.splsda.null$class$centroids.dist[, 1])
-conf_mat_c2 = get.confusion_matrix(truth = result_df$meta$disease, predicted = predict.splsda.null$class$centroids.dist[, 2])
-conf_mat_c1
-conf_mat_c2
+# plot_mint_results() with label="individual" → saves:
+#   output_files/individual_scoreplot.png
+#   output_files/individual_loadings_comp1.png
+#   output_files/individual_loadings_comp2.png
+plot_mint_results(mint_results_individual, Y = Y, study = study, label = "individual")
 ```
-
 
 ```{r}
-X = result_df$abund; Y = as.factor(result_df$meta$disease)
-# result_df$meta$study
+## Confusion matrix — Individual Filtering training set
+# predict() on training data gives in-sample performance (optimistic upper bound).
+predict_individual <- predict(mint_results_individual$model, newdata = X,
+                              dist = "centroids.dist", study.test = study)
 
-dim(result_df$abund)
-dim(as.data.frame(result_df$meta$disease))
-dim(as.data.frame(result_df$meta$study))
+# conf_mat_individual_c1/c2: confusion matrices at component 1 and component 2
+conf_mat_individual_c1 = get.confusion_matrix(truth = result_df_individual$meta$disease,
+                                              predicted = predict_individual$class$centroids.dist[, 1])
+conf_mat_individual_c2 = get.confusion_matrix(truth = result_df_individual$meta$disease,
+                                              predicted = predict_individual$class$centroids.dist[, 2])
+conf_mat_individual_c1
+conf_mat_individual_c2
 ```
 
-### introducing testing set
+### Forward Selection — MINT Model
 ```{r}
-# testset1 = draw_TestSet(dataset_study="PRJEB1786")
-# testset2 = draw_TestSet(dataset_study="PRJNA422434")
-testset1_obj = readRDS("PRJEB1786.rds")
-#testset2_obj = readRDS("PRJNA422434.rds")
-keep_cols <-c("Gender", "sample.ID")
-diseases <- c("Healthy", "T2D", "NGT")
+## Assemble integrative dataset from forward-selected studies
 
-# calculate the second smallest value
-test_obj = testset1_obj
-x <- unlist(test_obj$abund)
-x <- x[x > 0]
-second_smallest <- sort(unique(x), na.last = NA)[2]
+# Add 'study' column to each study's metadata for provenance tracking after bind_rows
+for (name in names(result_forward)) {
+  result_forward[[name]]$meta$study = strsplit(name, '\\.')[[1]][1]
+}
 
+# result_df_forward: all forward-selected studies stacked into one data frame
+# $abund – combined CLR abundance (rows = all samples, cols = taxa)
+# $meta  – combined metadata (rows = all samples, includes $study column)
+result_df_forward = bind_rows(result_forward)
 
-#abundance_lst_test = list(test1 = test_obj$abund)
-#meta_lst_test = list(test1 = test_obj$meta)
+# p_selected_forward: training abundance matrix for the forward-selection strategy.
+# Used in align_columns() when aligning with the HGMA test set.
+p_selected_forward <- result_df_forward$abund
 
-## instead of run_preprocessing we loop through pre_process single and then integrate filter to get counts without CLR
-testset <- preprocess_single(meta=testset1_obj$meta, abund = testset1_obj$abund, diseases = diseases, keep_cols = keep_cols, percent = 0.01, offset_value = second_smallest, CLR=FALSE)
+# Prepare run_mint() inputs for the forward-selection strategy
+X     <- result_df_forward$abund
+Y     <- as.factor(result_df_forward$meta$disease)
+study <- as.factor(result_df_forward$meta$study)
 
+# run_mint() with label="forward" → outputs saved as:
+#   output_files/forward_selected_taxa.xlsx
+mint_results_forward <- run_mint(X = X, Y = Y, ncomp = 2, dist = "centroids.dist",
+                                 label = "forward")
 
-
-#testset<- run_preprocessing(abundance_list = abundance_lst_test, meta_list = meta_lst_test, diseases = diseases, keep_cols = keep_cols, percent = 0.01, offset_value = second_smallest, threshold = 1)
-
-
-
-
-common_taxa = intersect( names(result_df$abund), names(testset$data) )
-# add the renaming logic here with edits
-# common_taxa = intersect( names(result_df$abund), names(testset$data) )
-new_train = result_df$abund[, common_taxa, drop=F]
-new_test = testset$data[, common_taxa, drop=F]
-testset$meta = testset$meta %>% 
-  mutate(disease = if_else(disease == "NGT", "Healthy", disease))
-testset$meta$study = "testing_set"
-
+# plot_mint_results() with label="forward" → saves score plot + loadings for forward strategy
+plot_mint_results(mint_results_forward, Y = Y, study = study, label = "forward")
 ```
 
-### Generalization
 ```{r}
-# re-train
-ab.mint.splsda = tune(method = "mint.splsda", X = new_train, Y = as.factor(result_df$meta$disease), ncomp = 2, folds=5, nrepeat=10,
-                      study = as.factor(result_df$meta$study), test.keepX = seq(10, ncol(new_train), 1), validation = 'Mfold', dist = "centroids.dist") 
-plot(ab.mint.splsda)
-optimal.keepX = ab.mint.splsda$choice.keepX
+## Confusion matrix — Forward Selection training set
+predict_forward <- predict(mint_results_forward$model, newdata = X,
+                           dist = "centroids.dist", study.test = study)
 
-mint.splsda.model = mint.splsda(X=new_train, Y=result_df$meta$disease, 
-                                study=result_df$meta$study, ncomp=2, keepX = optimal.keepX)
-
-perf(mint.splsda.model, validation="Mfolds", folds=5, nrepeat=10, dist="centroids.dist")$global.error$error.rate.class
-
-
-## Confusion matrix for testing set
-predict.splsda.null <- predict(mint.splsda.model, newdata = new_test, 
-                             dist = "centroids.dist", study.test = testset$meta$study)
-
-conf_mat_c1 = get.confusion_matrix(truth = testset$meta$disease, predicted = predict.splsda.null$class$centroids.dist[, 1])
-conf_mat_c2 = get.confusion_matrix(truth = testset$meta$disease, predicted = predict.splsda.null$class$centroids.dist[, 2])
-conf_mat_c1
-conf_mat_c2
+conf_mat_forward_c1 = get.confusion_matrix(truth = result_df_forward$meta$disease,
+                                           predicted = predict_forward$class$centroids.dist[, 1])
+conf_mat_forward_c2 = get.confusion_matrix(truth = result_df_forward$meta$disease,
+                                           predicted = predict_forward$class$centroids.dist[, 2])
+conf_mat_forward_c1
+conf_mat_forward_c2
 ```
 
-## train model on overlap data frame and use testing set to validate performance
-## make sure they have the same columns 
-training=a, b
-testing a/b --> maybe include this as two columns?
-## look at confusion matrix
+## Strategy Selection
+```{r}
+# Compare BER at component 2 for both strategies.
+# Lower BER → better discrimination → selected as the final model.
+# BER[2] indexes the component 2 row of perf$global.error$BER.
+ber_individual <- mint_results_individual$performance$global.error$BER[2]
+ber_forward    <- mint_results_forward$performance$global.error$BER[2]
 
+cat("BER (comp 2) — Individual Filtering:", ber_individual, "\n")
+cat("BER (comp 2) — Forward Selection:   ", ber_forward,    "\n")
 
+# selected_set: the winning strategy's combined data frame (abund + meta)
+# search_f:     string label used to identify which strategy was selected
+if (ber_individual <= ber_forward) {
+  selected_set <- result_df_individual
+  search_f     <- "individual"
+} else {
+  selected_set <- result_df_forward
+  search_f     <- "forward"
+}
+
+cat("Selected strategy:", search_f, "\n")
+```
+
+## Pathway a
+```{r}
+# Biological interpretation stub — to be completed.
+# Will use selected taxa from selected_set's MINT model to:
+#   - Map selected taxa to MetaCyc/KEGG pathways
+#   - Visualise contribution to each component
+```
+
+## Generalization
+```{r}
+#### apply align_columns in selected_set and testing set.
+## test set1: PRJEB1786 (Swedish cohort)
+test1 = readRDS("PRJEB1786.rds")
+
+# HGMA data is already relative abundance (not raw counts), so offset must be
+# the smallest non-zero value in the data — NOT 1 (which is for count data).
+x1      <- unlist(test1$abund)
+offset1 <- min(x1[x1 > 0])
+cat("PRJEB1786 offset:", offset1, "\n")
+
+processed1 <- preprocess_single(
+  meta         = test1$meta,
+  abund        = test1$abund,
+  diseases     = c("T2D", "NGT"),
+  keep_cols    = NULL,   # HGMA has no gender/body_site columns
+  percent      = 0.01,
+  offset_value = offset1,
+  CLR          = TRUE
+)
+
+# [FALLBACK] If preprocess_single() fails for HGMA, use these two calls directly:
+# filtered1 <- low_count_removal(test1$abund, 0.01)$data.filter
+# test1$abund <- clr.transformation(filtered1, offset1)
+
+processed1$meta <- processed1$meta %>%
+  mutate(disease = ifelse(disease == "NGT", "Healthy", disease))
+
+test1$abund <- processed1$data
+test1$meta  <- processed1$meta
+```
+
+```{r}
+## test set2: PRJNA422434 (Chinese cohort)
+test2 = readRDS("PRJNA422434.rds")
+
+# PRJNA422434 uses "NGT" (Normal Glucose Tolerance) as the Healthy label.
+# Recode to "Healthy" BEFORE preprocess_single() so filter_meta() retains these samples.
+test2$meta$disease <- ifelse(test2$meta$disease == "NGT", "Healthy", test2$meta$disease)
+
+x2      <- unlist(test2$abund)
+offset2 <- min(x2[x2 > 0])
+cat("PRJNA422434 offset:", offset2, "\n")
+
+processed2 <- preprocess_single(
+  meta         = test2$meta,
+  abund        = test2$abund,
+  diseases     = c("T2D", "Healthy"),
+  keep_cols    = NULL,
+  percent      = 0.01,
+  offset_value = offset2,
+  CLR          = TRUE
+)
+
+test2$abund <- processed2$data
+test2$meta  <- processed2$meta
+```
+
+### Testing outcome 1 (PRJEB1786)
+```{r}
+## get overlapped set
+# align_columns() strips "species: " prefixes, resolves HGMA "/" aliases,
+# and returns $training / $testing restricted to their common taxa columns.
+combined_obj1 = align_columns(p_selected=selected_set$abund, p_test=test1$abund)
+
+# Re-train MINT on common-taxa training subset.
+# model_mode = "testing" skips the xlsx save (we only want the fitted model here).
+X_train1  <- combined_obj1$training
+Y_train1  <- as.factor(selected_set$meta$disease)
+study_train1 <- as.factor(selected_set$meta$study)
+
+# include tuning
+#mint_results_test1 <- run_mint(X = X_train1, Y = Y_train1, ncomp = 2,
+#                               dist = "centroids.dist",
+#                               label = "prjeb1786", model_mode = "testing")
+# no tuning, pure mint.plsda
+mint_results_test1 = mint.plsda(X = X_train1, Y = Y_train1, 
+                                study = study_train1, ncomp = 2)
+
+# Predict on HGMA test set.
+# study.test must be a factor; all test samples belong to a single external study.
+predict_test1 <- predict(#mint_results_test1$model,
+                         mint_results_test1,
+                         newdata     = combined_obj1$testing,
+                         dist        = "centroids.dist",
+                         study.test  = factor(rep("PRJEB1786", nrow(combined_obj1$testing))))
+
+# Confusion matrices at comp1 and comp2
+cm_test1_c1 <- get.confusion_matrix(truth     = test1$meta$disease,
+                                    predicted = predict_test1$class$centroids.dist[, 1])
+cm_test1_c2 <- get.confusion_matrix(truth     = test1$meta$disease,
+                                    predicted = predict_test1$class$centroids.dist[, 2])
+
+cat("=== PRJEB1786 — Component 1 ===\n"); print(cm_test1_c1)
+cat("=== PRJEB1786 — Component 2 ===\n"); print(cm_test1_c2)
+
+# Compute specificity, sensitivity, and per-class BER from the confusion matrices.
+# Convention: T2D = positive class, Healthy = negative class.
+# cm rows = truth, cm cols = predicted; get.confusion_matrix() returns a 2×2 matrix.
+#
+#           Predicted:  Healthy    T2D
+# Truth:  Healthy  [  TN         FP  ]
+#         T2D      [  FN         TP  ]
+#
+# Sensitivity (Recall, T2D) = TP / (TP + FN)
+# Specificity (Healthy)     = TN / (TN + FP)
+# Per-class BER_T2D         = FN / (TP + FN)   [= 1 - Sensitivity]
+# Per-class BER_Healthy     = FP / (TN + FP)   [= 1 - Specificity]
+
+compute_metrics <- function(cm, label) {
+  # cm: 2×2 confusion matrix with rows = truth, cols = predicted
+  # Row/col order: alphabetical (Healthy first, T2D second)
+  TN <- cm["Healthy", "predicted.as.Healthy"]
+  FP <- cm["Healthy", "predicted.as.T2D"]
+  FN <- cm["T2D",     "predicted.as.Healthy"]
+  TP <- cm["T2D",     "predicted.as.T2D"]
+
+  sensitivity   <- TP / (TP + FN)
+  specificity   <- TN / (TN + FP)
+  ber_T2D       <- FN / (TP + FN)         # per-class error for T2D
+  ber_Healthy   <- FP / (TN + FP)         # per-class error for Healthy
+  overall_BER   <- (ber_T2D + ber_Healthy) / 2
+
+  cat(sprintf("--- %s ---\n", label))
+  cat(sprintf("  Sensitivity (T2D):     %.4f\n", sensitivity))
+  cat(sprintf("  Specificity (Healthy): %.4f\n", specificity))
+  cat(sprintf("  BER (T2D class):       %.4f\n", ber_T2D))
+  cat(sprintf("  BER (Healthy class):   %.4f\n", ber_Healthy))
+  cat(sprintf("  Overall BER:           %.4f\n", overall_BER))
+}
+
+compute_metrics(cm_test1_c1, "PRJEB1786 — Comp 1")
+compute_metrics(cm_test1_c2, "PRJEB1786 — Comp 2")
+```
+
+### Testing outcome 2 (PRJNA422434)
+```{r}
+## get overlapped set
+combined_obj2 = align_columns(p_selected=selected_set$abund, p_test=test2$abund)
+
+# Re-train MINT on common-taxa training subset for PRJNA422434.
+X_train2     <- combined_obj2$training
+Y_train2     <- as.factor(selected_set$meta$disease)
+study_train2 <- as.factor(selected_set$meta$study)
+
+#mint_results_test2 <- run_mint(X = X_train2, Y = Y_train2, ncomp = 2,
+#                               dist = "centroids.dist",
+#                               label = "prjna422434", model_mode = "testing")
+mint_results_test2 = mint.plsda(X = X_train2, Y = Y_train2, 
+                                study = study_train2, ncomp = 2)
+
+# Predict on HGMA test set 2.
+predict_test2 <- predict(#mint_results_test2$model,
+                         mint_results_test2, 
+                         newdata    = combined_obj2$testing,
+                         dist       = "centroids.dist",
+                         study.test = factor(rep("PRJNA422434", nrow(combined_obj2$testing))))
+
+# Confusion matrices at comp1 and comp2
+cm_test2_c1 <- get.confusion_matrix(truth     = test2$meta$disease,
+                                    predicted = predict_test2$class$centroids.dist[, 1])
+cm_test2_c2 <- get.confusion_matrix(truth     = test2$meta$disease,
+                                    predicted = predict_test2$class$centroids.dist[, 2])
+
+cat("=== PRJNA422434 — Component 1 ===\n"); print(cm_test2_c1)
+cat("=== PRJNA422434 — Component 2 ===\n"); print(cm_test2_c2)
+
+compute_metrics(cm_test2_c1, "PRJNA422434 — Comp 1")
+compute_metrics(cm_test2_c2, "PRJNA422434 — Comp 2")
+```
 
 
 
