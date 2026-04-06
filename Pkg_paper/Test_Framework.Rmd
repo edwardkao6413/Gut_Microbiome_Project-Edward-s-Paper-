@@ -288,7 +288,7 @@ if (ber_individual <= ber_forward) {
 cat("Selected strategy:", search_f, "\n")
 ```
 
-## Pathway a
+## Pathway analysis
 ```{r}
 # Biological interpretation stub — to be completed.
 # Will use selected taxa from selected_set's MINT model to:
@@ -327,6 +327,7 @@ processed1$meta <- processed1$meta %>%
 
 test1$abund <- processed1$data
 test1$meta  <- processed1$meta
+dim(test1$abund)
 ```
 
 ```{r}
@@ -353,14 +354,16 @@ processed2 <- preprocess_single(
 
 test2$abund <- processed2$data
 test2$meta  <- processed2$meta
+dim(test2$abund)
 ```
+
 
 ### Testing outcome 1 (PRJEB1786)
 ```{r}
 ## get overlapped set
 # align_columns() strips "species: " prefixes, resolves HGMA "/" aliases,
 # and returns $training / $testing restricted to their common taxa columns.
-combined_obj1 = align_columns(p_selected=selected_set$abund, p_test=test1$abund)
+combined_obj1 = align_columns2(p_selected=selected_set$abund, p_test=test1$abund)
 
 # Re-train MINT on common-taxa training subset.
 # model_mode = "testing" skips the xlsx save (we only want the fitted model here).
@@ -435,7 +438,7 @@ compute_metrics(cm_test1_c2, "PRJEB1786 — Comp 2")
 ### Testing outcome 2 (PRJNA422434)
 ```{r}
 ## get overlapped set
-combined_obj2 = align_columns(p_selected=selected_set$abund, p_test=test2$abund)
+combined_obj2 = align_columns2(p_selected=selected_set$abund, p_test=test2$abund)
 
 # Re-train MINT on common-taxa training subset for PRJNA422434.
 X_train2     <- combined_obj2$training

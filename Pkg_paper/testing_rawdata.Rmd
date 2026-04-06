@@ -11,6 +11,14 @@ library(dplyr)
 ```
 
 ```{r}
+test_rds = readRDS('PRJEB1786.rds')
+test_rds
+readRDS('res.rds')
+```
+
+
+
+```{r}
 rawdata <- curatedMetagenomicData("SankaranarayananK_2015.relative_abundance", dryrun = FALSE, counts = TRUE,rownames = "short"  )
 
 raw_tse <- rawdata[[1]]
